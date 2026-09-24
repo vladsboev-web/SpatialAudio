@@ -17,22 +17,33 @@ if [ -f "$PROJECT_DIR/Resources/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 fi
 
-swiftc -O \
-    -framework AppKit \
-    -framework SwiftUI \
-    -framework AVFoundation \
-    -framework CoreAudio \
-    -framework AudioToolbox \
-    "$SOURCES_DIR/RingBuffer.swift" \
-    "$SOURCES_DIR/ProfileManager.swift" \
-    "$SOURCES_DIR/AudioDeviceHelper.swift" \
-    "$SOURCES_DIR/AudioCaptureUnit.swift" \
-    "$SOURCES_DIR/SpatialEngine.swift" \
-    "$SOURCES_DIR/AudioCoordinator.swift" \
-    "$SOURCES_DIR/SpatialControlView.swift" \
-    "$SOURCES_DIR/MenuBarController.swift" \
-    "$SOURCES_DIR/main.swift" \
-    -o "$MACOS_DIR/SpatialAudio"
+SWIFT_SOURCES=(
+    "$SOURCES_DIR/RingBuffer.swift"
+    "$SOURCES_DIR/ProfileManager.swift"
+    "$SOURCES_DIR/AudioDeviceHelper.swift"
+    "$SOURCES_DIR/AudioCaptureUnit.swift"
+    "$SOURCES_DIR/SpatialEngine.swift"
+    "$SOURCES_DIR/AudioCoordinator.swift"
+    "$SOURCES_DIR/SpatialControlView.swift"
+    "$SOURCES_DIR/MenuBarController.swift"
+    "$SOURCES_DIR/main.swift"
+)
+
+echo "🔨 Сборка для Intel (x86_64)..."
+swiftc -O -target x86_64-apple-macos13.0 \
+    -framework AppKit -framework SwiftUI -framework AVFoundation -framework CoreAudio -framework AudioToolbox \
+    "${SWIFT_SOURCES[@]}" \
+    -o /tmp/SpatialAudio_x86_64
+
+echo "🔨 Сборка для Apple Silicon (arm64)..."
+swiftc -O -target arm64-apple-macos13.0 \
+    -framework AppKit -framework SwiftUI -framework AVFoundation -framework CoreAudio -framework AudioToolbox \
+    "${SWIFT_SOURCES[@]}" \
+    -o /tmp/SpatialAudio_arm64
+
+echo "🔗 Создание Universal 2 бинарника..."
+lipo -create -output "$MACOS_DIR/SpatialAudio" /tmp/SpatialAudio_x86_64 /tmp/SpatialAudio_arm64
+rm -f /tmp/SpatialAudio_x86_64 /tmp/SpatialAudio_arm64
 
 echo "📦 Создание Info.plist..."
 cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
