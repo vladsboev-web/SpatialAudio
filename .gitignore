@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# App Bundles & Build Output
+SpatialAudio.app/
+*.app/
+*.dSYM/
+*.o
+*.pcm
+.build/
+DerivedData/
+
+# Release Archives & Packages
+*.zip
+*.dmg
+*.pkg
+
+# IDE & Editor caches
+.idea/
+*.xcuserstate
+xcuserdata/
