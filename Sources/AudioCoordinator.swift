@@ -462,6 +462,14 @@ public final class AudioCoordinator: ObservableObject {
         }
     }
     
+    public func toggle() {
+        if isRunning {
+            stopPipeline()
+        } else {
+            startPipeline()
+        }
+    }
+    
     private func startLevelTimer() {
         guard levelTimer == nil, isRunning else { return }
         levelTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in

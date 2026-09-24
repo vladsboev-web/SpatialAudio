@@ -2,10 +2,12 @@ import AppKit
 import SwiftUI
 import Combine
 
-public final class MenuBarController: NSObject, NSPopoverDelegate {
+public final class MenuBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var cancellables = Set<AnyCancellable>()
+    private var windowMoveObserver: Any?
+    private var isAdjustingFrame = false
     
     public override init() {
         super.init()
@@ -26,12 +28,14 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         
         if let button = statusItem?.button {
             button.target = self
-            button.action = #selector(togglePopover(_:))
+            button.action = #selector(handleStatusItemClick(_:))
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         
         let pop = NSPopover()
         pop.contentSize = NSSize(width: 320, height: 575)
         pop.behavior = .transient
+        pop.animates = false
         pop.delegate = self
         pop.contentViewController = NSHostingController(rootView: SpatialControlView())
         self.popover = pop
@@ -50,6 +54,60 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
         }
     }
     
+    @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
+        let event = NSApp.currentEvent
+        let isRightClick = event?.type == .rightMouseUp ||
+            (event?.type == .leftMouseUp && event?.modifierFlags.contains(.control) == true)
+        
+        if isRightClick {
+            showContextMenu()
+        } else {
+            togglePopover(sender)
+        }
+    }
+    
+    private func showContextMenu() {
+        if let pop = popover, pop.isShown {
+            pop.performClose(nil)
+        }
+        
+        let menu = NSMenu()
+        menu.delegate = self
+        
+        let isRunning = AudioCoordinator.shared.isRunning
+        let toggleTitle = isRunning ? "Остановить" : "Запустить"
+        let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(togglePlayback), keyEquivalent: "")
+        toggleItem.target = self
+        if let icon = NSImage(systemSymbolName: isRunning ? "stop.fill" : "play.fill", accessibilityDescription: nil) {
+            toggleItem.image = icon
+        }
+        menu.addItem(toggleItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        let quitItem = NSMenuItem(title: "Закрыть SpatialAudio", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        if let icon = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil) {
+            quitItem.image = icon
+        }
+        menu.addItem(quitItem)
+        
+        statusItem?.menu = menu
+        statusItem?.button?.performClick(nil)
+    }
+    
+    public func menuDidClose(_ menu: NSMenu) {
+        statusItem?.menu = nil
+    }
+    
+    @objc private func togglePlayback() {
+        AudioCoordinator.shared.toggle()
+    }
+    
+    @objc private func quitApp() {
+        NSApp.terminate(nil)
+    }
+    
     @objc private func togglePopover(_ sender: AnyObject?) {
         guard let pop = popover, let button = statusItem?.button else { return }
         
@@ -57,8 +115,41 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
             pop.performClose(sender)
         } else {
             AudioCoordinator.shared.refreshDevices()
+            
+            NSApp.activate(ignoringOtherApps: true)
             pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            pop.contentViewController?.view.window?.makeKey()
+            
+            if let window = pop.contentViewController?.view.window {
+                window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+                window.level = .floating
+                window.makeKey()
+                clampWindowToScreen(window: window)
+                
+                if windowMoveObserver == nil {
+                    windowMoveObserver = NotificationCenter.default.addObserver(
+                        forName: NSWindow.didMoveNotification,
+                        object: window,
+                        queue: .main
+                    ) { [weak self, weak window] _ in
+                        guard let window = window else { return }
+                        self?.clampWindowToScreen(window: window)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func clampWindowToScreen(window: NSWindow) {
+        guard !isAdjustingFrame else { return }
+        guard let screen = window.screen ?? NSScreen.main else { return }
+        var frame = window.frame
+        let topBoundary = screen.frame.maxY
+        
+        if frame.maxY > topBoundary {
+            isAdjustingFrame = true
+            frame.origin.y = topBoundary - frame.size.height
+            window.setFrame(frame, display: true)
+            isAdjustingFrame = false
         }
     }
     
@@ -70,5 +161,9 @@ public final class MenuBarController: NSObject, NSPopoverDelegate {
     
     public func popoverDidClose(_ notification: Notification) {
         AudioCoordinator.shared.isUIVisible = false
+        if let obs = windowMoveObserver {
+            NotificationCenter.default.removeObserver(obs)
+            windowMoveObserver = nil
+        }
     }
 }
