@@ -3,17 +3,9 @@ import CoreAudio
 import Combine
 
 public func debugLog(_ message: String) {
-    let line = "[\(Date())] \(message)\n"
-    print(message)
-    if let data = line.data(using: .utf8) {
-        if let handle = try? FileHandle(forWritingTo: URL(fileURLWithPath: "/tmp/spatial_debug.log")) {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.closeFile()
-        } else {
-            try? data.write(to: URL(fileURLWithPath: "/tmp/spatial_debug.log"))
-        }
-    }
+    #if DEBUG
+    print("[SpatialAudio] \(message)")
+    #endif
 }
 
 public final class AudioCoordinator: ObservableObject {

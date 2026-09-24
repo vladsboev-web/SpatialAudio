@@ -69,7 +69,7 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/vladislavsboev/SpatialAudio.git
+   git clone https://github.com/vladsboev-web/SpatialAudio.git
    cd SpatialAudio
    ```
 2. Установите драйвер BlackHole (если еще не установлен):

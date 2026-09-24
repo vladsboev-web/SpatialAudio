@@ -24,3 +24,8 @@ DerivedData/
 .idea/
 *.xcuserstate
 xcuserdata/
+
+# Secrets & Tokens
+*.token
+*token*
+git.md
