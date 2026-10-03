@@ -132,10 +132,8 @@ public struct SpatialControlView: View {
                             name: newProfileName,
                             isSpatialEnabled: coordinator.isSpatialEnabled,
                             speakerAngleDeg: coordinator.speakerAngleDeg,
-                            distance: coordinator.distance,
                             reverbBlend: coordinator.reverbBlend,
-                            volume: coordinator.volume,
-                            gainMultiplier: coordinator.gainMultiplier
+                            volume: coordinator.volume
                         )
                         coordinator.applyProfile(p)
                         isCreatingProfile = false
@@ -270,7 +268,6 @@ public struct SpatialControlView: View {
         VStack(spacing: 10) {
             SoundstageVisualizer(
                 angle: coordinator.speakerAngleDeg,
-                distance: coordinator.distance,
                 isEnabled: coordinator.isSpatialEnabled && coordinator.isRunning,
                 leftLevel: coordinator.leftLevel,
                 rightLevel: coordinator.rightLevel
@@ -312,23 +309,6 @@ public struct SpatialControlView: View {
                     .disabled(!coordinator.isSpatialEnabled || !coordinator.isRunning)
             }
             
-            // Дистанция
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Дистанция колонок:")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.primary)
-                    Spacer()
-                    Text(String(format: "%.1f м", coordinator.distance))
-                        .font(.caption)
-                        .fontWeight(.bold)
-                        .foregroundColor(.primary)
-                }
-                Slider(value: $coordinator.distance, in: 0.5...3.0, step: 0.1)
-                    .disabled(!coordinator.isSpatialEnabled || !coordinator.isRunning)
-            }
-            
             // Акустика комнаты
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -344,23 +324,6 @@ public struct SpatialControlView: View {
                 }
                 Slider(value: $coordinator.reverbBlend, in: 0.0...0.03, step: 0.001)
                     .disabled(!coordinator.isSpatialEnabled || !coordinator.isRunning)
-            }
-            
-            // Усиление / Громкость
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Усиление громкости:")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundColor(.primary)
-                    Spacer()
-                    Text("\(Int(coordinator.gainMultiplier * 100))%")
-                        .font(.caption)
-                        .fontWeight(.bold)
-                        .foregroundColor(.primary)
-                }
-                Slider(value: $coordinator.gainMultiplier, in: 0.5...2.0, step: 0.05)
-                    .disabled(!coordinator.isRunning)
             }
         }
     }
@@ -461,7 +424,6 @@ public struct SpatialControlView: View {
 /// Визуализатор звуковой сцены в реальном времени
 struct SoundstageVisualizer: View {
     let angle: Double
-    let distance: Double
     let isEnabled: Bool
     let leftLevel: Float
     let rightLevel: Float
@@ -494,8 +456,7 @@ struct SoundstageVisualizer: View {
                 
                 // Рассчет положения левой и правой колонок
                 let rad = angle * .pi / 180.0
-                let normalizedDist = CGFloat((distance - 0.5) / 2.5) // 0 ... 1
-                let reach = 35.0 + normalizedDist * 28.0
+                let reach: CGFloat = 52.0
                 
                 let lx = centerX - reach * sin(CGFloat(rad))
                 let rx = centerX + reach * sin(CGFloat(rad))

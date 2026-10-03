@@ -30,16 +30,10 @@ public final class SpatialEngine {
         didSet { updateAlgorithmAndPositions() }
     }
     
-    public var distance: Float = 1.0 { // 0.5m ... 3.0m
-        didSet { updateAlgorithmAndPositions() }
-    }
+    public private(set) var distance: Float = 1.0 // Фиксированная оптимальная дистанция 1.0м
     
-    public var reverbBlend: Float = 0.01 { // 0.0 ... 0.03 (деликатная акустика помещения)
+    public var reverbBlend: Float = 0.01 { // 0.0 ... 0.03 (акустика помещения)
         didSet { updateReverb() }
-    }
-    
-    public var gainMultiplier: Float = 1.25 { // Чистое усиление (+2 dB)
-        didSet { updateVolume() }
     }
     
     public var volume: Float = 1.0 {
@@ -48,17 +42,14 @@ public final class SpatialEngine {
     
     // MARK: - Нормализация громкости
     private func updateVolume() {
-        // Точная математическая компенсация закона затухания Apple SpatialMixer:
-        // Для d <= 1.0 затухание 1.0. Для d > 1.0 затухание = 1.0 / distance.
-        // Умножение на max(1.0, distance) делает громкость АБСОЛЮТНО ПОСТОЯННОЙ на любой дистанции!
-        let distComp = max(1.0, distance)
-        let effectiveVolume = isSpatialEnabled ? (volume * gainMultiplier * distComp) : volume
-        engine.mainMixerNode.outputVolume = effectiveVolume
+        // Уровень воспроизведения равен 1:1 системному звуку (Unity Gain).
+        // Дистанция колонок больше не затухает, так как rolloffFactor = 0.0.
+        engine.mainMixerNode.outputVolume = volume
     }
     
     private func updateReverb() {
         guard let left = leftSourceNode, let right = rightSourceNode else { return }
-        // Диапазон AVAudioNode.reverbBlend строго 0.0 (сухо) ... 1.0 (мокро)
+        // Акустика помещения: от 0.0 (абсолютно сухой звук) до 0.03 (естественная комната)
         let blendVal = isSpatialEnabled ? min(1.0, max(0.0, reverbBlend)) : 0.0
         left.reverbBlend = blendVal
         right.reverbBlend = blendVal
@@ -119,6 +110,10 @@ public final class SpatialEngine {
             engine.attach(environment)
         }
         
+        // Отключаем физическое затухание расстояния:
+        // Дистанция колонок меняет геометрию сцены, задержку и акустику, но уровень громкости не затухает!
+        environment.distanceAttenuationParameters.rolloffFactor = 0.0
+        
         // 2. Создаем системный Peak Limiter от Apple для исключения перегрузок и хрипов
         let limiterDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
@@ -165,10 +160,11 @@ public final class SpatialEngine {
         engine.connect(leftNode, to: environment, format: monoFormat)
         engine.connect(rightNode, to: environment, format: monoFormat)
         
-        // Цепочка обработки: Окружение -> PeakLimiter (защита от клиппинга) -> Главный микшер -> Выход
-        engine.connect(environment, to: limiter, format: stereoFormat)
-        engine.connect(limiter, to: engine.mainMixerNode, format: stereoFormat)
-        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: stereoFormat)
+        // Цепочка обработки:
+        // Окружение (3D сцена) -> Главный микшер (Master Volume) -> Peak Limiter (аварийный предохранитель на выходе) -> Выход
+        engine.connect(environment, to: engine.mainMixerNode, format: stereoFormat)
+        engine.connect(engine.mainMixerNode, to: limiter, format: stereoFormat)
+        engine.connect(limiter, to: engine.outputNode, format: stereoFormat)
         
         // 5. Акустика комнаты (натуральная комната прослушивания)
         environment.reverbParameters.enable = true

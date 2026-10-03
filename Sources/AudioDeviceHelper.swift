@@ -226,25 +226,52 @@ public final class AudioDeviceHelper {
         return status == noErr
     }
     
-    /// Установить системную громкость устройства (например, на BlackHole на 100% и размутировать)
-    @discardableResult
-    public static func setDeviceVolume(deviceID: AudioDeviceID, volume: Float32) -> Bool {
-        var addr = AudioObjectPropertyAddress(
+    /// Получить системную громкость устройства (основной элемент или канал 1)
+    public static func getDeviceVolume(deviceID: AudioDeviceID) -> Float32? {
+        var addrMain = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
+        var vol: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        if AudioObjectHasProperty(deviceID, &addrMain) {
+            let status = AudioObjectGetPropertyData(deviceID, &addrMain, 0, nil, &size, &vol)
+            if status == noErr { return vol }
+        }
+        
+        var addrCh1 = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: 1
+        )
+        if AudioObjectHasProperty(deviceID, &addrCh1) {
+            let status = AudioObjectGetPropertyData(deviceID, &addrCh1, 0, nil, &size, &vol)
+            if status == noErr { return vol }
+        }
+        return nil
+    }
+    
+    /// Установить системную громкость устройства (например, на BlackHole или физических колонках)
+    @discardableResult
+    public static func setDeviceVolume(deviceID: AudioDeviceID, volume: Float32) -> Bool {
         var v = volume
-        let status = AudioObjectSetPropertyData(deviceID, &addr, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-        if status != noErr {
-            for ch in 1...2 {
-                var chAddr = AudioObjectPropertyAddress(
-                    mSelector: kAudioDevicePropertyVolumeScalar,
-                    mScope: kAudioDevicePropertyScopeOutput,
-                    mElement: UInt32(ch)
-                )
-                var chV = volume
-                AudioObjectSetPropertyData(deviceID, &chAddr, 0, nil, UInt32(MemoryLayout<Float32>.size), &chV)
+        var addrMain = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(deviceID, &addrMain) {
+            _ = AudioObjectSetPropertyData(deviceID, &addrMain, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+        }
+        for ch in 1...2 {
+            var addrCh = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeScalar,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: UInt32(ch)
+            )
+            if AudioObjectHasProperty(deviceID, &addrCh) {
+                _ = AudioObjectSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
             }
         }
         var muteAddr = AudioObjectPropertyAddress(
@@ -253,7 +280,9 @@ public final class AudioDeviceHelper {
             mElement: kAudioObjectPropertyElementMain
         )
         var unmuted: UInt32 = 0
-        AudioObjectSetPropertyData(deviceID, &muteAddr, 0, nil, 4, &unmuted)
+        if AudioObjectHasProperty(deviceID, &muteAddr) {
+            AudioObjectSetPropertyData(deviceID, &muteAddr, 0, nil, 4, &unmuted)
+        }
         return true
     }
 }

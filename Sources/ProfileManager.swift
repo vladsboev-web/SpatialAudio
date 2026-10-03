@@ -5,26 +5,26 @@ public struct SpatialProfile: Identifiable, Codable, Equatable {
     public var name: String
     public var isSpatialEnabled: Bool
     public var speakerAngleDeg: Double
-    public var distance: Double
+    public var distance: Double? = 1.0
     public var reverbBlend: Double
     public var volume: Double
-    public var gainMultiplier: Double
+    public var gainMultiplier: Double?
     
     public init(
         id: UUID = UUID(),
         name: String,
         isSpatialEnabled: Bool = true,
         speakerAngleDeg: Double = 30.0,
-        distance: Double = 1.0,
+        distance: Double? = 1.0,
         reverbBlend: Double = 0.01,
         volume: Double = 1.0,
-        gainMultiplier: Double = 1.25
+        gainMultiplier: Double? = 1.0
     ) {
         self.id = id
         self.name = name
         self.isSpatialEnabled = isSpatialEnabled
         self.speakerAngleDeg = speakerAngleDeg
-        self.distance = distance
+        self.distance = distance ?? 1.0
         self.reverbBlend = reverbBlend
         self.volume = volume
         self.gainMultiplier = gainMultiplier
@@ -78,7 +78,7 @@ public final class ProfileManager: ObservableObject {
                 distance: 1.0,
                 reverbBlend: 0.01,
                 volume: 1.0,
-                gainMultiplier: 1.25
+                gainMultiplier: 1.0
             )
             self.profiles = [defaultProfile]
             saveProfiles()
@@ -109,10 +109,8 @@ public final class ProfileManager: ObservableObject {
         name: String,
         isSpatialEnabled: Bool = true,
         speakerAngleDeg: Double = 30.0,
-        distance: Double = 1.0,
         reverbBlend: Double = 0.01,
-        volume: Double = 1.0,
-        gainMultiplier: Double = 1.25
+        volume: Double = 1.0
     ) -> SpatialProfile {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let finalName = trimmed.isEmpty ? "Профиль \(profiles.count + 1)" : trimmed
@@ -121,10 +119,10 @@ public final class ProfileManager: ObservableObject {
             name: finalName,
             isSpatialEnabled: isSpatialEnabled,
             speakerAngleDeg: speakerAngleDeg,
-            distance: distance,
+            distance: 1.0,
             reverbBlend: min(0.03, max(0.0, reverbBlend)),
             volume: volume,
-            gainMultiplier: gainMultiplier
+            gainMultiplier: 1.0
         )
         
         profiles.append(newProfile)
@@ -144,18 +142,14 @@ public final class ProfileManager: ObservableObject {
     public func updateActiveProfileSettings(
         isSpatialEnabled: Bool,
         speakerAngleDeg: Double,
-        distance: Double,
         reverbBlend: Double,
-        volume: Double,
-        gainMultiplier: Double
+        volume: Double
     ) {
         guard let index = profiles.firstIndex(where: { $0.id == activeProfileID }) else { return }
         profiles[index].isSpatialEnabled = isSpatialEnabled
         profiles[index].speakerAngleDeg = speakerAngleDeg
-        profiles[index].distance = distance
         profiles[index].reverbBlend = min(0.03, max(0.0, reverbBlend))
         profiles[index].volume = volume
-        profiles[index].gainMultiplier = gainMultiplier
         saveProfiles()
     }
     

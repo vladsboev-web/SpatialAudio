@@ -33,13 +33,6 @@ public final class AudioCoordinator: ObservableObject {
         }
     }
     
-    @Published public var distance: Double = 1.0 {
-        didSet {
-            spatialEngine.distance = Float(distance)
-            saveActiveProfileSettings()
-        }
-    }
-    
     @Published public var reverbBlend: Double = 0.01 { // 1% легкой естественной акустики (диапазон 0-3%)
         didSet {
             spatialEngine.reverbBlend = Float(reverbBlend)
@@ -50,13 +43,6 @@ public final class AudioCoordinator: ObservableObject {
     @Published public var volume: Double = 1.0 {
         didSet {
             spatialEngine.volume = Float(volume)
-            saveActiveProfileSettings()
-        }
-    }
-    
-    @Published public var gainMultiplier: Double = 1.25 {
-        didSet {
-            spatialEngine.gainMultiplier = Float(gainMultiplier)
             saveActiveProfileSettings()
         }
     }
@@ -94,6 +80,7 @@ public final class AudioCoordinator: ObservableObject {
     private var levelTimer: Timer?
     private var savedSystemDefaultOutputDeviceID: AudioDeviceID?
     private var pendingTargetSystemDefaultID: AudioDeviceID?
+    private var savedOutputDeviceVolume: Float32?
     
     private init() {
         if let currentProfile = ProfileManager.shared.activeProfile {
@@ -115,7 +102,6 @@ public final class AudioCoordinator: ObservableObject {
         if let currentDef = AudioDeviceHelper.getDefaultOutputDeviceID(),
            let bh = AudioDeviceHelper.findBlackHoleDevice(),
            currentDef == bh.id {
-            AudioDeviceHelper.setDeviceVolume(deviceID: bh.id, volume: 1.0)
             startPipeline(routeSystemAudio: false)
         }
     }
@@ -127,10 +113,8 @@ public final class AudioCoordinator: ObservableObject {
         ProfileManager.shared.updateActiveProfileSettings(
             isSpatialEnabled: isSpatialEnabled,
             speakerAngleDeg: speakerAngleDeg,
-            distance: distance,
             reverbBlend: reverbBlend,
-            volume: volume,
-            gainMultiplier: gainMultiplier
+            volume: volume
         )
     }
     
@@ -138,10 +122,8 @@ public final class AudioCoordinator: ObservableObject {
         isApplyingProfile = true
         self.isSpatialEnabled = profile.isSpatialEnabled
         self.speakerAngleDeg = profile.speakerAngleDeg
-        self.distance = profile.distance
         self.reverbBlend = min(0.03, max(0.0, profile.reverbBlend))
         self.volume = profile.volume
-        self.gainMultiplier = profile.gainMultiplier
         isApplyingProfile = false
         
         ProfileManager.shared.selectProfile(id: profile.id)
@@ -241,7 +223,6 @@ public final class AudioCoordinator: ObservableObject {
         
         if let bh = bh, currentDefault == bh.id {
             // 🟢 Сценарий 1: В системном меню macOS выбран BlackHole 2ch (вариант приложения)
-            AudioDeviceHelper.setDeviceVolume(deviceID: bh.id, volume: 1.0)
             if !self.isRunning {
                 debugLog("[AudioCoordinator] В macOS выбран BlackHole -> даем 300 мс на стабилизацию системных потоков")
                 statusMessage = "Подключение..."
@@ -255,16 +236,21 @@ public final class AudioCoordinator: ObservableObject {
             }
         } else {
             // ⏸ Сценарий 2: Пользователь явно выбрал в macOS другой источник (динамики, другие наушники и т.д.)
-            if let nonVirtualDev = AudioDeviceHelper.getDevice(id: currentDefault), !nonVirtualDev.isVirtual && nonVirtualDev.hasOutput {
-                self.savedSystemDefaultOutputDeviceID = currentDefault
-                self.selectedOutputDeviceID = currentDefault
-                debugLog("[AudioCoordinator] Запомнили физическое устройство вывода из macOS: \(nonVirtualDev.name) (\(currentDefault))")
-            }
             if self.isRunning {
+                // Восстанавливаем физическому устройству актуальную громкость из BlackHole
+                if let bh = AudioDeviceHelper.findBlackHoleDevice(),
+                   let currentBhVol = AudioDeviceHelper.getDeviceVolume(deviceID: bh.id) {
+                    AudioDeviceHelper.setDeviceVolume(deviceID: self.selectedOutputDeviceID, volume: currentBhVol)
+                }
                 let devName = AudioDeviceHelper.getDevice(id: currentDefault)?.name ?? "другое устройство"
                 debugLog("[AudioCoordinator] В macOS выбран \(devName) -> приостановка приложения")
                 self.pausePipeline()
                 self.statusMessage = "Приостановлено (\(devName))"
+            }
+            if let nonVirtualDev = AudioDeviceHelper.getDevice(id: currentDefault), !nonVirtualDev.isVirtual && nonVirtualDev.hasOutput {
+                self.savedSystemDefaultOutputDeviceID = currentDefault
+                self.selectedOutputDeviceID = currentDefault
+                debugLog("[AudioCoordinator] Запомнили физическое устройство вывода из macOS: \(nonVirtualDev.name) (\(currentDefault))")
             }
         }
     }
@@ -278,11 +264,15 @@ public final class AudioCoordinator: ObservableObject {
                 savedSystemDefaultOutputDeviceID = currentDef
                 debugLog("[AudioCoordinator] savedSystemDefaultOutputDeviceID = \(currentDef)")
             }
+            // Синхронизируем громкость перед переключением в macOS:
+            if let currentPhysVol = AudioDeviceHelper.getDeviceVolume(deviceID: currentDef) {
+                AudioDeviceHelper.setDeviceVolume(deviceID: bh.id, volume: currentPhysVol)
+                debugLog("[AudioCoordinator] routeSystemSoundToBlackHole: pre-sync BlackHole volume to \(currentPhysVol)")
+            }
         }
         pendingTargetSystemDefaultID = bh.id
         debugLog("[AudioCoordinator] routeSystemSoundToBlackHole: setting default to \(bh.id)")
         AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
-        AudioDeviceHelper.setDeviceVolume(deviceID: bh.id, volume: 1.0)
         
         // Таймаут безопасности: запустить пайплайн через 0.8 сек, если системное событие задержалось
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -437,6 +427,17 @@ public final class AudioCoordinator: ObservableObject {
             return
         }
         
+        // 7. Двусторонняя синхронизация системной громкости:
+        // Считываем физическую громкость колонок/наушников (например, 49%),
+        // переносим её на BlackHole (чтобы ползунок macOS на экране показал ровно этот уровень),
+        // а само физическое устройство переводим на 100% (1.0), устраняя искусственное ограничение.
+        if let currentPhysVol = AudioDeviceHelper.getDeviceVolume(deviceID: outDev.id) {
+            self.savedOutputDeviceVolume = currentPhysVol
+            AudioDeviceHelper.setDeviceVolume(deviceID: inDev.id, volume: currentPhysVol)
+            AudioDeviceHelper.setDeviceVolume(deviceID: outDev.id, volume: 1.0)
+            debugLog("[AudioCoordinator] Volume sync: physical=\(currentPhysVol) -> BlackHole=\(currentPhysVol), physicalOut=1.0")
+        }
+        
         isRunning = true
         statusMessage = "Spatial Audio: \(outDev.name)"
         debugLog("[AudioCoordinator] startPipeline SUCCESS! isRunning=true")
@@ -448,6 +449,18 @@ public final class AudioCoordinator: ObservableObject {
     
     public func stopPipeline(restoreSystemAudio: Bool = true) {
         pausePipeline()
+        
+        // Восстановление системной громкости физического устройства:
+        // Считываем текущую громкость BlackHole (пользователь мог регулировать системную громкость)
+        if let bh = AudioDeviceHelper.findBlackHoleDevice(),
+           let currentBhVol = AudioDeviceHelper.getDeviceVolume(deviceID: bh.id) {
+            AudioDeviceHelper.setDeviceVolume(deviceID: selectedOutputDeviceID, volume: currentBhVol)
+            debugLog("[AudioCoordinator] Restoring physical device volume to current BlackHole level: \(currentBhVol)")
+        } else if let savedVol = savedOutputDeviceVolume {
+            AudioDeviceHelper.setDeviceVolume(deviceID: selectedOutputDeviceID, volume: savedVol)
+            debugLog("[AudioCoordinator] Restoring physical device volume to saved: \(savedVol)")
+        }
+        savedOutputDeviceVolume = nil
         
         if restoreSystemAudio {
             restoreSystemSound()
