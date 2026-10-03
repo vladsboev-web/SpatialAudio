@@ -4,8 +4,8 @@ import AudioToolbox
 import AVFoundation
 
 public final class SpatialEngine {
-    private let engine = AVAudioEngine()
-    private let environment = AVAudioEnvironmentNode()
+    private var engine = AVAudioEngine()
+    private var environment = AVAudioEnvironmentNode()
     private var limiterNode: AVAudioUnitEffect?
     
     private var leftSourceNode: AVAudioSourceNode?
@@ -64,10 +64,10 @@ public final class SpatialEngine {
         stop()
     }
     
-    public func setup(outputDeviceID: AudioDeviceID, sampleRate: Double = 44100.0) -> Bool {
+    /// Полный сброс графа и пересоздание AVAudioEngine для исключения недействительного AUHAL
+    public func resetEngine() {
         stop()
-        
-        // Отсоединяем предыдущие временные ноды, если они были созданы
+        engine.reset()
         if let left = leftSourceNode {
             engine.detach(left)
             leftSourceNode = nil
@@ -80,6 +80,15 @@ public final class SpatialEngine {
             engine.detach(lim)
             limiterNode = nil
         }
+        if environment.engine != nil {
+            engine.detach(environment)
+        }
+        self.engine = AVAudioEngine()
+        self.environment = AVAudioEnvironmentNode()
+    }
+    
+    public func setup(outputDeviceID: AudioDeviceID, sampleRate: Double = 44100.0) -> Bool {
+        resetEngine()
         
         self.currentOutputDeviceID = outputDeviceID
         
@@ -106,9 +115,7 @@ public final class SpatialEngine {
         let actualRate = hwFormat.sampleRate > 0 ? hwFormat.sampleRate : sampleRate
         self.sampleRate = actualRate
         
-        if environment.engine == nil {
-            engine.attach(environment)
-        }
+        engine.attach(environment)
         
         // Отключаем физическое затухание расстояния:
         // Дистанция колонок меняет геометрию сцены, задержку и акустику, но уровень громкости не затухает!
