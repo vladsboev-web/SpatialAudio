@@ -2,6 +2,7 @@ import Foundation
 import CoreAudio
 import AudioToolbox
 import AVFoundation
+import Accelerate
 
 public final class SpatialEngine {
     private var engine = AVAudioEngine()
@@ -40,10 +41,11 @@ public final class SpatialEngine {
         didSet { updateVolume() }
     }
     
-    // MARK: - Нормализация громкости
+    public var inputVolumeScale: Float = 1.0 {
+        didSet { updateVolume() }
+    }
+    
     private func updateVolume() {
-        // Уровень воспроизведения равен 1:1 системному звуку (Unity Gain).
-        // Дистанция колонок больше не затухает, так как rolloffFactor = 0.0.
         engine.mainMixerNode.outputVolume = volume
     }
     

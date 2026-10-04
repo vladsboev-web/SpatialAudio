@@ -86,11 +86,12 @@ SpatialAudio/
   - `pendingTargetSystemDefaultID: AudioDeviceID?` — ожидаемый целевой ID при асинхронном переключении.
 - **Ключевые методы**:
   - `setupHardwareListeners()` — подписка на системные уведомления CoreAudio (`kAudioHardwarePropertyDevices` и `kAudioHardwarePropertyDefaultOutputDevice`).
+  - `startMonitoringBlackHoleVolume(bhID:)` / `syncSessionVolumeToOutputs(volume:)` — слушатель громкости BlackHole (`kVirtualMainVolume`, `VolumeScalar`) для отображения процента в UI и поддержания Single Attenuation на ЦАП.
   - `handleDefaultOutputDeviceChanged()` — обработка системных сценариев: автопауза при выборе динамиков/других наушников, автостарт с 300 мс стабилизацией при выборе BlackHole.
   - `handleHardwareDevicesChanged()` — горячее подключение новых Bluetooth-наушников или обработка их отключения.
   - `startPipeline(routeSystemAudio: Bool)` — запуск захвата и воспроизведения.
   - `pausePipeline()` — мягкая остановка аудиодвижков без изменения системного устройства.
-  - `stopPipeline(restoreSystemAudio: Bool)` — полная остановка с возвратом системного вывода на наушники/динамики.
+  - `stopPipeline(restoreSystemAudio: Bool)` — полная остановка с возвратом системного вывода на наушники/динамики и восстановлением громкости.
   - `toggle()` — мгновенное переключение состояния (запуск/остановка) из контекстного меню.
 
 ---

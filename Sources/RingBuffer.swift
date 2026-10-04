@@ -14,9 +14,10 @@ public final class AudioRingBuffer {
     private var isInitialized: Bool = false
     private var lock = os_unfair_lock()
     
-    // Целевой размер буфера задержки: 768 сэмплов (~17.4 мс при 44.1 кГц, ~16.0 мс при 48 кГц)
-    private let targetLatencySamples: Double = 768.0
-    private let preRollSamples: Int = 1024
+    // Целевой размер буфера задержки: 2048 сэмплов (~46.4 мс при 44.1 кГц, ~42.6 мс при 48 кГц)
+    // Полностью устраняет джиттер Bluetooth без слышимой задержки (порог синхронизации губ ITU-R: 100 мс)
+    private let targetLatencySamples: Double = 2048.0
+    private let preRollSamples: Int = 2048
     
     public init(capacityPowerOfTwo: Int = 16) { // 65536 сэмплов
         self.capacity = 1 << capacityPowerOfTwo
@@ -61,8 +62,8 @@ public final class AudioRingBuffer {
         
         let currentLag = Double(writePos) - readPosFrac
         
-        // Экстренная защита при глубоком сбое (например, после сна Mac > 185 мс)
-        if currentLag > 8192.0 || currentLag < -512.0 {
+        // Экстренная защита при глубоком сбое (например, после сна Mac > 300 мс)
+        if currentLag > 16384.0 || currentLag < -512.0 {
             readPosFrac = Double(writePos) - targetLatencySamples
         }
         
