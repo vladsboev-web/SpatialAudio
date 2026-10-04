@@ -64,12 +64,17 @@ public final class SpatialEngine {
     
     deinit {
         stop()
+        let oldEngine = self.engine
+        DispatchQueue.global(qos: .utility).async {
+            oldEngine.stop()
+            oldEngine.reset()
+            _ = oldEngine
+        }
     }
     
     /// Полный сброс графа и пересоздание AVAudioEngine для исключения недействительного AUHAL
     public func resetEngine() {
         stop()
-        engine.reset()
         if let left = leftSourceNode {
             engine.detach(left)
             leftSourceNode = nil
@@ -85,8 +90,15 @@ public final class SpatialEngine {
         if environment.engine != nil {
             engine.detach(environment)
         }
+        let oldEngine = self.engine
         self.engine = AVAudioEngine()
         self.environment = AVAudioEnvironmentNode()
+        DispatchQueue.global(qos: .utility).async {
+            // Освобождаем старый движок в фоновом потоке, исключая блокировку Main Thread в -[AVAudioEngine dealloc]
+            oldEngine.stop()
+            oldEngine.reset()
+            _ = oldEngine
+        }
     }
     
     public func setup(outputDeviceID: AudioDeviceID, sampleRate: Double = 44100.0) -> Bool {

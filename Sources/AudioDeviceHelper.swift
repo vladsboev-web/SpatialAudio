@@ -228,38 +228,6 @@ public final class AudioDeviceHelper {
     
     public static let kVirtualMainVolume = AudioObjectPropertySelector(0x766d7663) // 'vmvc' (kAudioHardwareServiceDeviceProperty_VirtualMainVolume)
     
-    /// Проверить, поддерживает ли устройство аппаратную/системную регулировку громкости
-    public static func isVolumeSettable(deviceID: AudioDeviceID) -> Bool {
-        var settable: DarwinBoolean = false
-        var addrVMVC = AudioObjectPropertyAddress(
-            mSelector: kVirtualMainVolume,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        if AudioObjectHasProperty(deviceID, &addrVMVC) {
-            AudioObjectIsPropertySettable(deviceID, &addrVMVC, &settable)
-            if settable.boolValue { return true }
-        }
-        var addrMain = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        if AudioObjectHasProperty(deviceID, &addrMain) {
-            AudioObjectIsPropertySettable(deviceID, &addrMain, &settable)
-            if settable.boolValue { return true }
-        }
-        var addrCh1 = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: 1
-        )
-        if AudioObjectHasProperty(deviceID, &addrCh1) {
-            AudioObjectIsPropertySettable(deviceID, &addrCh1, &settable)
-            if settable.boolValue { return true }
-        }
-        return false
-    }
     
     /// Получить системную громкость устройства (VirtualMainVolume, Main или канал 1)
     public static func getDeviceVolume(deviceID: AudioDeviceID) -> Float32? {
