@@ -12,6 +12,7 @@
 | [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) | Полный каталог файлов, классов, методов и их взаимосвязей |
 | [SYSTEM_INTEGRATION.md](SYSTEM_INTEGRATION.md) | Системные сценарии macOS, TCC (микрофон), подпись кода, CoreAudio |
 | [DIALOG_HISTORY_AND_SOLUTIONS.md](DIALOG_HISTORY_AND_SOLUTIONS.md) | **Выжимка из диалога**: история решений всех возникших проблем и багов |
+| [ENTRY_POINT_FOR_NEXT_AGENT.md](ENTRY_POINT_FOR_NEXT_AGENT.md) | **Точка входа для нового агента**: текущее состояние, протоколы, первопричина бага тишины |
 | [USER_MANUAL.md](USER_MANUAL.md) | Инструкция по сборке, установке, запуску и повседневному использованию |
 | [ROADMAP_NEXT_STEPS.md](ROADMAP_NEXT_STEPS.md) | Задачи и идеи для развития в новом диалоге |
 

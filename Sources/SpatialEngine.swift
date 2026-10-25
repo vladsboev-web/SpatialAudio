@@ -6,6 +6,7 @@ import Accelerate
 
 public final class SpatialEngine {
     private var engine = AVAudioEngine()
+    public var currentEngine: AVAudioEngine { engine }
     private var environment = AVAudioEnvironmentNode()
     private var limiterNode: AVAudioUnitEffect?
     
@@ -46,7 +47,8 @@ public final class SpatialEngine {
     }
     
     private func updateVolume() {
-        engine.mainMixerNode.outputVolume = volume
+        let hrtfCompensation: Float = isSpatialEnabled ? 1.58 : 1.0 // +4.0 dB компенсация затухания HRTFHQ
+        engine.mainMixerNode.outputVolume = volume * inputVolumeScale * hrtfCompensation
     }
     
     private func updateReverb() {
@@ -63,42 +65,35 @@ public final class SpatialEngine {
     }
     
     deinit {
-        stop()
-        let oldEngine = self.engine
-        DispatchQueue.global(qos: .utility).async {
-            oldEngine.stop()
-            oldEngine.reset()
-            _ = oldEngine
-        }
+        teardownCurrentGraph()
     }
     
-    /// Полный сброс графа и пересоздание AVAudioEngine для исключения недействительного AUHAL
-    public func resetEngine() {
+    private func teardownCurrentGraph() {
         stop()
+        engine.stop()
         if let left = leftSourceNode {
-            engine.detach(left)
+            if left.engine != nil { engine.detach(left) }
             leftSourceNode = nil
         }
         if let right = rightSourceNode {
-            engine.detach(right)
+            if right.engine != nil { engine.detach(right) }
             rightSourceNode = nil
         }
         if let lim = limiterNode {
-            engine.detach(lim)
+            if lim.engine != nil { engine.detach(lim) }
             limiterNode = nil
         }
         if environment.engine != nil {
             engine.detach(environment)
         }
-        let oldEngine = self.engine
+        engine.reset()
+    }
+    
+    /// Полный синхронный сброс графа и пересоздание AVAudioEngine без гонки потоков в CoreAudio HAL
+    public func resetEngine() {
+        teardownCurrentGraph()
         self.engine = AVAudioEngine()
         self.environment = AVAudioEnvironmentNode()
-        DispatchQueue.global(qos: .utility).async {
-            // Освобождаем старый движок в фоновом потоке, исключая блокировку Main Thread в -[AVAudioEngine dealloc]
-            oldEngine.stop()
-            oldEngine.reset()
-            _ = oldEngine
-        }
     }
     
     public func setup(outputDeviceID: AudioDeviceID, sampleRate: Double = 44100.0) -> Bool {
@@ -106,16 +101,18 @@ public final class SpatialEngine {
         
         self.currentOutputDeviceID = outputDeviceID
         
-        // 1. Привязываем выход AVAudioEngine к выбранному устройству вывода
+        // 1. Привязываем выход AVAudioEngine к выбранному устройству вывода (строго один раз)
+        var deviceAssigned = false
         do {
             try engine.outputNode.auAudioUnit.setDeviceID(outputDeviceID)
+            deviceAssigned = true
         } catch {
-            print("[SpatialEngine] setDeviceID предупреждение: \(error)")
+            print("[SpatialEngine] auAudioUnit.setDeviceID предупреждение: \(error)")
         }
         
-        if let outputUnit = engine.outputNode.audioUnit {
+        if !deviceAssigned, let outputUnit = engine.outputNode.audioUnit {
             var devID = outputDeviceID
-            _ = AudioUnitSetProperty(
+            let status = AudioUnitSetProperty(
                 outputUnit,
                 kAudioOutputUnitProperty_CurrentDevice,
                 kAudioUnitScope_Global,
@@ -123,9 +120,19 @@ public final class SpatialEngine {
                 &devID,
                 UInt32(MemoryLayout<AudioDeviceID>.size)
             )
+            if status == noErr {
+                deviceAssigned = true
+            } else {
+                print("[SpatialEngine] Ошибка привязки устройства \(outputDeviceID): \(status)")
+                return false
+            }
         }
         
         let hwFormat = engine.outputNode.outputFormat(forBus: 0)
+        guard hwFormat.channelCount > 0 else {
+            print("[SpatialEngine] Выходной поток устройства \(outputDeviceID) ещё не готов (0 каналов)")
+            return false
+        }
         let actualRate = hwFormat.sampleRate > 0 ? hwFormat.sampleRate : sampleRate
         self.sampleRate = actualRate
         

@@ -229,17 +229,21 @@ public final class AudioDeviceHelper {
     public static let kVirtualMainVolume = AudioObjectPropertySelector(0x766d7663) // 'vmvc' (kAudioHardwareServiceDeviceProperty_VirtualMainVolume)
     
     
-    /// Получить системную громкость устройства (VirtualMainVolume, Main или канал 1)
+    /// Получить системную громкость устройства (VirtualMainVolume через AudioHardwareService, Main или каналы)
     public static func getDeviceVolume(deviceID: AudioDeviceID) -> Float32? {
         var vol: Float32 = 0
         var size = UInt32(MemoryLayout<Float32>.size)
         
-        // 1. Проверяем VirtualMainVolume (основное системное свойство macOS)
+        // 1. VirtualMainVolume через AudioHardwareService (официальный API macOS для Bluetooth и виртуальных устройств)
         var addrVMVC = AudioObjectPropertyAddress(
             mSelector: kVirtualMainVolume,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
+        if AudioHardwareServiceHasProperty(deviceID, &addrVMVC) {
+            let status = AudioHardwareServiceGetPropertyData(deviceID, &addrVMVC, 0, nil, &size, &vol)
+            if status == noErr { return vol }
+        }
         if AudioObjectHasProperty(deviceID, &addrVMVC) {
             let status = AudioObjectGetPropertyData(deviceID, &addrVMVC, 0, nil, &size, &vol)
             if status == noErr { return vol }
@@ -269,21 +273,70 @@ public final class AudioDeviceHelper {
         return nil
     }
     
-    /// Установить системную громкость устройства (VirtualMainVolume, Main и каналы 1..2)
-    @discardableResult
-    public static func setDeviceVolume(deviceID: AudioDeviceID, volume: Float32) -> Bool {
-        var v = volume
-        var didApply = false
-        
-        // 1. VirtualMainVolume
+    /// Проверить, поддерживает ли устройство регулировку громкости на аппаратном уровне
+    public static func isVolumeSettable(deviceID: AudioDeviceID) -> Bool {
         var addrVMVC = AudioObjectPropertyAddress(
             mSelector: kVirtualMainVolume,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        if AudioObjectHasProperty(deviceID, &addrVMVC) {
+        if AudioHardwareServiceHasProperty(deviceID, &addrVMVC) {
+            var isSettable: DarwinBoolean = false
+            if AudioHardwareServiceIsPropertySettable(deviceID, &addrVMVC, &isSettable) == noErr && isSettable.boolValue {
+                return true
+            }
+        }
+        var addrMain = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var isSettableMain: DarwinBoolean = false
+        if AudioObjectIsPropertySettable(deviceID, &addrMain, &isSettableMain) == noErr && isSettableMain.boolValue {
+            return true
+        }
+        var addrCh1 = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: 1
+        )
+        var isSettableCh1: DarwinBoolean = false
+        if AudioObjectIsPropertySettable(deviceID, &addrCh1, &isSettableCh1) == noErr && isSettableCh1.boolValue {
+            return true
+        }
+        return false
+    }
+    
+    /// Установить системную громкость устройства (VirtualMainVolume через AudioHardwareService, Main и каналы 1..2)
+    @discardableResult
+    public static func setDeviceVolume(deviceID: AudioDeviceID, volume: Float32) -> Bool {
+        var v = max(0.0, min(1.0, volume))
+        var didApply = false
+        
+        // 1. VirtualMainVolume через AudioHardwareService (основной API для Bluetooth, AirPods и BlackHole)
+        var addrVMVC = AudioObjectPropertyAddress(
+            mSelector: kVirtualMainVolume,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var vmvcApplied = false
+        if AudioHardwareServiceHasProperty(deviceID, &addrVMVC) {
+            var isSettable: DarwinBoolean = false
+            let settableStatus = AudioHardwareServiceIsPropertySettable(deviceID, &addrVMVC, &isSettable)
+            if settableStatus == noErr && isSettable.boolValue {
+                let s = AudioHardwareServiceSetPropertyData(deviceID, &addrVMVC, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                if s == noErr {
+                    didApply = true
+                    vmvcApplied = true
+                }
+            }
+        }
+        if !vmvcApplied && AudioObjectHasProperty(deviceID, &addrVMVC) {
             let s = AudioObjectSetPropertyData(deviceID, &addrVMVC, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-            if s == noErr { didApply = true }
+            if s == noErr {
+                didApply = true
+                vmvcApplied = true
+            }
         }
         
         // 2. VolumeScalar Main
@@ -293,32 +346,64 @@ public final class AudioDeviceHelper {
             mElement: kAudioObjectPropertyElementMain
         )
         if AudioObjectHasProperty(deviceID, &addrMain) {
-            let s = AudioObjectSetPropertyData(deviceID, &addrMain, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-            if s == noErr { didApply = true }
+            var isSettable: DarwinBoolean = false
+            if AudioObjectIsPropertySettable(deviceID, &addrMain, &isSettable) == noErr && isSettable.boolValue {
+                let s = AudioObjectSetPropertyData(deviceID, &addrMain, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                if s == noErr { didApply = true }
+            }
         }
         
-        // 3. VolumeScalar каналы 1 и 2
+        // 3. VolumeScalar каналы 1 и 2 (без двойного дублирования IPC)
         for ch in 1...2 {
             var addrCh = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyVolumeScalar,
                 mScope: kAudioDevicePropertyScopeOutput,
                 mElement: UInt32(ch)
             )
+            var chApplied = false
             if AudioObjectHasProperty(deviceID, &addrCh) {
-                let s = AudioObjectSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-                if s == noErr { didApply = true }
+                var isSettable: DarwinBoolean = false
+                if AudioObjectIsPropertySettable(deviceID, &addrCh, &isSettable) == noErr && isSettable.boolValue {
+                    let s = AudioObjectSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                    if s == noErr {
+                        didApply = true
+                        chApplied = true
+                    }
+                }
+            }
+            if !chApplied && AudioHardwareServiceHasProperty(deviceID, &addrCh) {
+                var isSettable: DarwinBoolean = false
+                if AudioHardwareServiceIsPropertySettable(deviceID, &addrCh, &isSettable) == noErr && isSettable.boolValue {
+                    let s = AudioHardwareServiceSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                    if s == noErr { didApply = true }
+                }
             }
         }
         
-        // 4. Снятие заглушения (Mute)
-        var muteAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var unmuted: UInt32 = (v > 0.001) ? 0 : 1
-        if AudioObjectHasProperty(deviceID, &muteAddr) {
-            _ = AudioObjectSetPropertyData(deviceID, &muteAddr, 0, nil, 4, &unmuted)
+        // 4. Управление заглушением (Mute) — только если фактический статус отличается
+        let shouldMute = (v <= 0.001)
+        if isDeviceMuted(deviceID: deviceID) != shouldMute {
+            var muteAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyMute,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var mutedVal: UInt32 = shouldMute ? 1 : 0
+            var muteApplied = false
+            if AudioObjectHasProperty(deviceID, &muteAddr) {
+                var isSettable: DarwinBoolean = false
+                if AudioObjectIsPropertySettable(deviceID, &muteAddr, &isSettable) == noErr && isSettable.boolValue {
+                    if AudioObjectSetPropertyData(deviceID, &muteAddr, 0, nil, 4, &mutedVal) == noErr {
+                        muteApplied = true
+                    }
+                }
+            }
+            if !muteApplied && AudioHardwareServiceHasProperty(deviceID, &muteAddr) {
+                var isSettable: DarwinBoolean = false
+                if AudioHardwareServiceIsPropertySettable(deviceID, &muteAddr, &isSettable) == noErr && isSettable.boolValue {
+                    _ = AudioHardwareServiceSetPropertyData(deviceID, &muteAddr, 0, nil, 4, &mutedVal)
+                }
+            }
         }
         return didApply
     }

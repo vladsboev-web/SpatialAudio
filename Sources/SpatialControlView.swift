@@ -337,16 +337,18 @@ public struct SpatialControlView: View {
                     .foregroundColor(.primary)
                     .frame(width: 50, alignment: .leading)
                 
-                Picker("", selection: $coordinator.selectedInputDeviceID) {
+                Picker("", selection: Binding(
+                    get: { coordinator.selectedInputDeviceID },
+                    set: { newID in
+                        coordinator.selectInputDeviceByUser(newID)
+                    }
+                )) {
                     ForEach(coordinator.inputDevices) { dev in
                         let icon = dev.isVirtual ? "🌊 " : "🎤 "
                         Text("\(icon)\(dev.name)").tag(dev.id)
                     }
                 }
                 .labelsHidden()
-                .onChange(of: coordinator.selectedInputDeviceID) { _ in
-                    coordinator.restartPipeline()
-                }
             }
             
             HStack {
@@ -356,16 +358,18 @@ public struct SpatialControlView: View {
                     .foregroundColor(.primary)
                     .frame(width: 50, alignment: .leading)
                 
-                Picker("", selection: $coordinator.selectedOutputDeviceID) {
+                Picker("", selection: Binding(
+                    get: { coordinator.selectedOutputDeviceID },
+                    set: { newID in
+                        coordinator.selectOutputDeviceByUser(newID)
+                    }
+                )) {
                     ForEach(coordinator.outputDevices) { dev in
                         let icon = (dev.isBluetooth || dev.isHeadphones) ? "🎧 " : (dev.isBuiltIn ? "🔊 " : "🔈 ")
                         Text("\(icon)\(dev.name)").tag(dev.id)
                     }
                 }
                 .labelsHidden()
-                .onChange(of: coordinator.selectedOutputDeviceID) { _ in
-                    coordinator.restartPipeline()
-                }
             }
             
             // Индикаторы аудио-сигнала

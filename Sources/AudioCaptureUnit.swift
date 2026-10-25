@@ -2,6 +2,7 @@ import Foundation
 import CoreAudio
 import AudioToolbox
 import AVFoundation
+import Accelerate
 
 public final class AudioCaptureUnit {
     private var audioUnit: AudioComponentInstance?
@@ -159,12 +160,8 @@ public final class AudioCaptureUnit {
                             
                             var maxL: Float = 0.0
                             var maxR: Float = 0.0
-                            for i in 0..<frames {
-                                let l = abs(lPtr[i])
-                                let r = abs(rPtr[i])
-                                if l > maxL { maxL = l }
-                                if r > maxR { maxR = r }
-                            }
+                            vDSP_maxmgv(lPtr.baseAddress!, 1, &maxL, vDSP_Length(frames))
+                            vDSP_maxmgv(rPtr.baseAddress!, 1, &maxR, vDSP_Length(frames))
                             unit.peakLevelL = max(unit.peakLevelL * 0.9, maxL)
                             unit.peakLevelR = max(unit.peakLevelR * 0.9, maxR)
                         }
