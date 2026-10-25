@@ -18,6 +18,7 @@ if [ -f "$PROJECT_DIR/Resources/AppIcon.icns" ]; then
 fi
 
 SWIFT_SOURCES=(
+    "$SOURCES_DIR/LocalizationManager.swift"
     "$SOURCES_DIR/RingBuffer.swift"
     "$SOURCES_DIR/ProfileManager.swift"
     "$SOURCES_DIR/AudioDeviceHelper.swift"

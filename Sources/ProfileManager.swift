@@ -71,8 +71,9 @@ public final class ProfileManager: ObservableObject {
             }
         } else {
             // Создаем единственный чистый начальный профиль без предустановок
+            let isRU = (Locale.preferredLanguages.first?.lowercased().hasPrefix("ru") == true)
             let defaultProfile = SpatialProfile(
-                name: "Основной",
+                name: isRU ? "Основной" : "Default",
                 isSpatialEnabled: true,
                 speakerAngleDeg: 30.0,
                 distance: 1.0,
@@ -113,7 +114,7 @@ public final class ProfileManager: ObservableObject {
         volume: Double = 1.0
     ) -> SpatialProfile {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let finalName = trimmed.isEmpty ? "Профиль \(profiles.count + 1)" : trimmed
+        let finalName = trimmed.isEmpty ? L10n.newProfileDefaultName(profiles.count + 1) : trimmed
         
         let newProfile = SpatialProfile(
             name: finalName,
@@ -159,6 +160,23 @@ public final class ProfileManager: ObservableObject {
         guard !trimmed.isEmpty, let index = profiles.firstIndex(where: { $0.id == id }) else { return }
         profiles[index].name = trimmed
         saveProfiles()
+    }
+    
+    /// Автоматический перевод имени стандартного профиля при переключении языка RU <-> EN
+    public func localizeDefaultProfileNameIfNeeded(for lang: AppLanguage) {
+        var changed = false
+        for i in 0..<profiles.count {
+            if profiles[i].name == "Основной" || profiles[i].name == "Default" {
+                let targetName = (lang == .ru) ? "Основной" : "Default"
+                if profiles[i].name != targetName {
+                    profiles[i].name = targetName
+                    changed = true
+                }
+            }
+        }
+        if changed {
+            saveProfiles()
+        }
     }
     
     /// Delete: Удаление профиля (минимум 1 профиль всегда сохраняется)

@@ -4,6 +4,7 @@ import CoreAudio
 public struct SpatialControlView: View {
     @ObservedObject var coordinator = AudioCoordinator.shared
     @ObservedObject var profileManager = ProfileManager.shared
+    @ObservedObject var l10n = LocalizationManager.shared
     
     @State private var isCreatingProfile: Bool = false
     @State private var isRenamingProfile: Bool = false
@@ -53,7 +54,7 @@ public struct SpatialControlView: View {
                     .foregroundColor(.primary)
                     .font(.subheadline)
                 
-                Text("Профиль:")
+                Text(L10n.profileLabel)
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundColor(.primary)
@@ -76,7 +77,7 @@ public struct SpatialControlView: View {
                 
                 // Создать новый профиль
                 Button(action: {
-                    newProfileName = "Профиль \(profileManager.profiles.count + 1)"
+                    newProfileName = L10n.newProfileDefaultName(profileManager.profiles.count + 1)
                     isRenamingProfile = false
                     isCreatingProfile.toggle()
                 }) {
@@ -85,7 +86,7 @@ public struct SpatialControlView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.blue)
-                .help("Создать новый профиль с текущими настройками")
+                .help(L10n.createProfileHelp)
                 
                 // Переименовать активный профиль
                 Button(action: {
@@ -100,7 +101,7 @@ public struct SpatialControlView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(.primary)
-                .help("Переименовать текущий профиль")
+                .help(L10n.renameProfileHelp)
                 
                 // Удалить активный профиль (с защитой)
                 Button(action: {
@@ -117,17 +118,17 @@ public struct SpatialControlView: View {
                 .buttonStyle(.plain)
                 .foregroundColor(profileManager.profiles.count > 1 ? .red : .gray.opacity(0.4))
                 .disabled(profileManager.profiles.count <= 1)
-                .help(profileManager.profiles.count > 1 ? "Удалить текущий профиль" : "Нельзя удалить единственный профиль")
+                .help(L10n.deleteProfileHelp(profileManager.profiles.count > 1))
             }
             
             // Инлайн-поле для создания профиля
             if isCreatingProfile {
                 HStack(spacing: 6) {
-                    TextField("Имя профиля", text: $newProfileName)
+                    TextField(L10n.profileNamePlaceholder, text: $newProfileName)
                         .textFieldStyle(.roundedBorder)
                         .controlSize(.small)
                     
-                    Button("Создать") {
+                    Button(L10n.createBtn) {
                         let p = profileManager.createProfile(
                             name: newProfileName,
                             isSpatialEnabled: coordinator.isSpatialEnabled,
@@ -141,7 +142,7 @@ public struct SpatialControlView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     
-                    Button("Отмена") {
+                    Button(L10n.cancelBtn) {
                         isCreatingProfile = false
                     }
                     .controlSize(.small)
@@ -154,18 +155,18 @@ public struct SpatialControlView: View {
             // Инлайн-поле для переименования профиля
             if isRenamingProfile {
                 HStack(spacing: 6) {
-                    TextField("Новое имя", text: $renameProfileName)
+                    TextField(L10n.newNamePlaceholder, text: $renameProfileName)
                         .textFieldStyle(.roundedBorder)
                         .controlSize(.small)
                     
-                    Button("Сохранить") {
+                    Button(L10n.saveBtn) {
                         profileManager.renameProfile(id: profileManager.activeProfileID, newName: renameProfileName)
                         isRenamingProfile = false
                     }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     
-                    Button("Отмена") {
+                    Button(L10n.cancelBtn) {
                         isRenamingProfile = false
                     }
                     .controlSize(.small)
@@ -198,12 +199,28 @@ public struct SpatialControlView: View {
                 
                 Spacer()
                 
+                // Переключатель языка RU / EN
+                Button(action: {
+                    l10n.toggleLanguage()
+                }) {
+                    Text(l10n.language.badgeTitle)
+                        .font(.caption2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.08))
+                        .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                .help(L10n.languageToggleHelp)
+                
                 // Индикатор состояния
                 HStack(spacing: 6) {
                     Circle()
                         .fill(coordinator.isRunning ? (coordinator.isSpatialEnabled ? Color.green : Color.orange) : Color.gray)
                         .frame(width: 8, height: 8)
-                    Text(coordinator.isRunning ? (coordinator.isSpatialEnabled ? "Spatial ON" : "Bypass") : "Пауза")
+                    Text(coordinator.isRunning ? (coordinator.isSpatialEnabled ? "Spatial ON" : "Bypass") : L10n.pausedBadge)
                         .font(.caption2)
                         .fontWeight(.semibold)
                         .foregroundColor(.primary)
@@ -228,12 +245,12 @@ public struct SpatialControlView: View {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.yellow)
-                        Text("Требуется драйвер BlackHole")
+                        Text(L10n.blackHoleRequiredTitle)
                             .font(.caption)
                             .fontWeight(.semibold)
                             .foregroundColor(.primary)
                     }
-                    Text("Для перехвата звука с Mac установите драйвер BlackHole 2ch:")
+                    Text(L10n.blackHoleRequiredDesc)
                         .font(.caption2)
                         .foregroundColor(.primary)
                     
@@ -250,7 +267,7 @@ public struct SpatialControlView: View {
                     }) {
                         HStack {
                             Image(systemName: "arrow.down.circle")
-                            Text("Установить BlackHole (в 1 клик)")
+                            Text(L10n.installBlackHoleBtn)
                         }
                         .frame(maxWidth: .infinity)
                     }
@@ -270,17 +287,18 @@ public struct SpatialControlView: View {
                 angle: coordinator.speakerAngleDeg,
                 isEnabled: coordinator.isSpatialEnabled && coordinator.isRunning,
                 leftLevel: coordinator.leftLevel,
-                rightLevel: coordinator.rightLevel
+                rightLevel: coordinator.rightLevel,
+                listenerLabel: L10n.listenerYou
             )
             .frame(height: 110)
             
             Toggle(isOn: $coordinator.isSpatialEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Пространственное стерео")
+                    Text(L10n.spatialStereoTitle)
                         .font(.subheadline)
                         .fontWeight(.semibold)
                         .foregroundColor(.primary)
-                    Text("Вынос звука из головы (Apple HRTF)")
+                    Text(L10n.spatialStereoSubtitle)
                         .font(.caption2)
                         .foregroundColor(.primary)
                 }
@@ -295,7 +313,7 @@ public struct SpatialControlView: View {
             // Угол колонок / ширина
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Ширина сцены (угол):")
+                    Text(L10n.stageWidthLabel)
                         .font(.caption)
                         .fontWeight(.medium)
                         .foregroundColor(.primary)
@@ -312,7 +330,7 @@ public struct SpatialControlView: View {
             // Акустика комнаты
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text("Акустика комнаты:")
+                    Text(L10n.roomAcousticsLabel)
                         .font(.caption)
                         .fontWeight(.medium)
                         .foregroundColor(.primary)
@@ -331,7 +349,7 @@ public struct SpatialControlView: View {
     private var devicesAndMetersBlock: some View {
         VStack(spacing: 8) {
             HStack {
-                Text("Вход:")
+                Text(L10n.inputLabel)
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundColor(.primary)
@@ -352,7 +370,7 @@ public struct SpatialControlView: View {
             }
             
             HStack {
-                Text("Выход:")
+                Text(L10n.outputLabel)
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundColor(.primary)
@@ -400,7 +418,7 @@ public struct SpatialControlView: View {
             }) {
                 HStack {
                     Image(systemName: coordinator.isRunning ? "stop.fill" : "play.fill")
-                    Text(coordinator.isRunning ? "Остановить" : "Запустить")
+                    Text(coordinator.isRunning ? L10n.stopBtn : L10n.startBtn)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -412,7 +430,7 @@ public struct SpatialControlView: View {
             }) {
                 Image(systemName: "gearshape")
             }
-            .help("Настройки звука macOS")
+            .help(L10n.soundSettingsHelp)
             
             Button(action: {
                 coordinator.stopPipeline(restoreSystemAudio: true)
@@ -420,7 +438,7 @@ public struct SpatialControlView: View {
             }) {
                 Image(systemName: "power")
             }
-            .help("Выйти из приложения")
+            .help(L10n.quitHelp)
         }
     }
 }
@@ -431,6 +449,7 @@ struct SoundstageVisualizer: View {
     let isEnabled: Bool
     let leftLevel: Float
     let rightLevel: Float
+    let listenerLabel: String
     
     var body: some View {
         GeometryReader { geo in
@@ -452,7 +471,7 @@ struct SoundstageVisualizer: View {
                     Image(systemName: "person.crop.circle.fill")
                         .font(.system(size: 20))
                         .foregroundColor(.cyan)
-                    Text("Вы")
+                    Text(listenerLabel)
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.white)
                 }

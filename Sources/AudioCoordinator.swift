@@ -54,7 +54,7 @@ public final class AudioCoordinator: ObservableObject {
     
     @Published public var isRunning: Bool = false
     @Published public var isBlackHoleInstalled: Bool = false
-    @Published public var statusMessage: String = "Готов к запуску"
+    @Published public var statusMessage: String = L10n.readyToStart
     
     @Published public var leftLevel: Float = 0.0
     @Published public var rightLevel: Float = 0.0
@@ -196,7 +196,26 @@ public final class AudioCoordinator: ObservableObject {
     }
     
     public func currentOutputDeviceName() -> String {
-        return AudioDeviceHelper.getDevice(id: selectedOutputDeviceID)?.name ?? "Наушники"
+        return AudioDeviceHelper.getDevice(id: selectedOutputDeviceID)?.name ?? L10n.headphonesFallback
+    }
+    
+    public func refreshLocalizedStatus() {
+        if isRunning {
+            let isMuted = AudioDeviceHelper.isDeviceMuted(deviceID: selectedInputDeviceID)
+            let pct = Int(round(currentSessionVolume * 100))
+            if isMuted {
+                statusMessage = L10n.spatialAudioMuted(currentOutputDeviceName())
+            } else {
+                statusMessage = L10n.spatialAudioActive(currentOutputDeviceName(), pct)
+            }
+        } else if statusMessage == "Готов к запуску" || statusMessage == "Ready to start" {
+            statusMessage = L10n.readyToStart
+        } else if statusMessage == "Остановлено" || statusMessage == "Stopped" {
+            statusMessage = L10n.stopped
+        } else if statusMessage.hasPrefix("Приостановлено (") || statusMessage.hasPrefix("Paused (") {
+            let devName = AudioDeviceHelper.getDefaultOutputDeviceID().flatMap { AudioDeviceHelper.getDevice(id: $0)?.name } ?? currentOutputDeviceName()
+            statusMessage = L10n.pausedOnDevice(devName)
+        }
     }
     
     private func startMonitoringBlackHoleVolume(bhID: AudioDeviceID) {
@@ -212,9 +231,9 @@ public final class AudioCoordinator: ObservableObject {
                     self.syncSessionVolumeToOutputs(volume: effectiveVol)
                     let pct = Int(round(vol * 100))
                     if isMuted {
-                        self.statusMessage = "Spatial Audio: \(self.currentOutputDeviceName()) (Заглушено)"
+                        self.statusMessage = L10n.spatialAudioMuted(self.currentOutputDeviceName())
                     } else {
-                        self.statusMessage = "Spatial Audio: \(self.currentOutputDeviceName()) (\(pct)%)"
+                        self.statusMessage = L10n.spatialAudioActive(self.currentOutputDeviceName(), pct)
                     }
                     debugLog("[AudioCoordinator] Системная громкость BlackHole -> \(vol) (\(pct)%), muted=\(isMuted)")
                 }
@@ -566,7 +585,7 @@ public final class AudioCoordinator: ObservableObject {
                 let bh = AudioDeviceHelper.findBlackHoleDevice()
                 if let bh = bh, currentDefault == bh.id {
                     debugLog("[AudioCoordinator] BlackHole готов в macOS -> даем 200 мс на стабилизацию")
-                    statusMessage = "Подключение..."
+                    statusMessage = L10n.connecting
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                         guard let self = self, !self.isRunning else { return }
                         if let cur = AudioDeviceHelper.getDefaultOutputDeviceID(), cur == bh.id {
@@ -607,7 +626,7 @@ public final class AudioCoordinator: ObservableObject {
             // 🟢 Сценарий 1: В системном меню macOS выбран BlackHole 2ch (запуск приложения пользователем)
             if !self.isRunning {
                 debugLog("[AudioCoordinator] В macOS выбран BlackHole -> даем 200 мс на стабилизацию системных потоков")
-                statusMessage = "Подключение..."
+                statusMessage = L10n.connecting
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                     guard let self = self, !self.isRunning else { return }
                     if let cur = AudioDeviceHelper.getDefaultOutputDeviceID(), cur == bh.id {
@@ -655,11 +674,11 @@ public final class AudioCoordinator: ObservableObject {
                 }
                 AudioDeviceHelper.setDeviceVolume(deviceID: currentDefault, volume: self.currentSessionVolume)
                 
-                let devName = AudioDeviceHelper.getDevice(id: currentDefault)?.name ?? "другое устройство"
+                let devName = AudioDeviceHelper.getDevice(id: currentDefault)?.name ?? L10n.otherDevice
                 debugLog("[AudioCoordinator] В macOS выбран \(devName) -> пауза пайплайна")
                 self.wasStreamingActive = false
                 self.pausePipeline()
-                self.statusMessage = "Приостановлено (\(devName))"
+                self.statusMessage = L10n.pausedOnDevice(devName)
             }
             if let nonVirtualDev = AudioDeviceHelper.getDevice(id: currentDefault), !nonVirtualDev.isVirtual && nonVirtualDev.hasOutput {
                 self.savedSystemDefaultOutputDeviceID = currentDefault
@@ -825,7 +844,7 @@ public final class AudioCoordinator: ObservableObject {
         
         guard let inDev = inDev, let outDev = outDev else {
             debugLog("[AudioCoordinator] Error: Devices not found!")
-            statusMessage = "Устройства не найдены"
+            statusMessage = L10n.devicesNotFound
             return
         }
         
@@ -839,7 +858,7 @@ public final class AudioCoordinator: ObservableObject {
             if let bh = AudioDeviceHelper.findBlackHoleDevice(), currentDef != bh.id {
                 debugLog("[AudioCoordinator] Current default is not BlackHole, initiating routing...")
                 routeSystemSoundToBlackHole()
-                statusMessage = "Подключение к аудиосистеме..."
+                statusMessage = L10n.routingSystemAudio
                 return
             }
         }
@@ -903,9 +922,9 @@ public final class AudioCoordinator: ObservableObject {
         let isMuted = AudioDeviceHelper.isDeviceMuted(deviceID: inDev.id)
         let pct = Int(round(currentSessionVolume * 100))
         if isMuted {
-            statusMessage = "Spatial Audio: \(outDev.name) (Заглушено)"
+            statusMessage = L10n.spatialAudioMuted(outDev.name)
         } else {
-            statusMessage = "Spatial Audio: \(outDev.name) (\(pct)%)"
+            statusMessage = L10n.spatialAudioActive(outDev.name, pct)
         }
         debugLog("[AudioCoordinator] startPipeline SUCCESS! isRunning=true")
         
@@ -926,7 +945,7 @@ public final class AudioCoordinator: ObservableObject {
         if pipelineRetryCount < 3 {
             pipelineRetryCount += 1
             debugLog("[AudioCoordinator] Ошибка старта на \(outDev.name), retry #\(pipelineRetryCount) через 0.6 сек...")
-            statusMessage = "Подключение к \(outDev.name)..."
+            statusMessage = L10n.connectingTo(outDev.name)
             pipelineRetryWorkItem?.cancel()
             let retryItem = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
@@ -940,7 +959,7 @@ public final class AudioCoordinator: ObservableObject {
             isConnectingHeadphones = false
             isHandlingDeviceDisconnection = false
             debugLog("[AudioCoordinator] Ошибка старта: превышен лимит попыток. Восстанавливаем системный звук.")
-            statusMessage = "Ошибка вывода на \(outDev.name)"
+            statusMessage = L10n.outputError(outDev.name)
             restoreSystemSound()
         }
     }
@@ -967,7 +986,7 @@ public final class AudioCoordinator: ObservableObject {
             restoreSystemSound()
         }
         
-        statusMessage = "Остановлено"
+        statusMessage = L10n.stopped
     }
     
     public func restartPipeline() {

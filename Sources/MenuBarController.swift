@@ -75,7 +75,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate, NSMenuDelegat
         menu.delegate = self
         
         let isRunning = AudioCoordinator.shared.isRunning
-        let toggleTitle = isRunning ? "Остановить" : "Запустить"
+        let toggleTitle = isRunning ? L10n.stopBtn : L10n.startBtn
         let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(togglePlayback), keyEquivalent: "")
         toggleItem.target = self
         if let icon = NSImage(systemSymbolName: isRunning ? "stop.fill" : "play.fill", accessibilityDescription: nil) {
@@ -85,7 +85,7 @@ public final class MenuBarController: NSObject, NSPopoverDelegate, NSMenuDelegat
         
         menu.addItem(NSMenuItem.separator())
         
-        let quitItem = NSMenuItem(title: "Закрыть SpatialAudio", action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: L10n.quitMenuTitle, action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
         if let icon = NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: nil) {
             quitItem.image = icon
