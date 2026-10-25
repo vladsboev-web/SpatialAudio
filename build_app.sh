@@ -83,7 +83,13 @@ echo "✍️ Подписание приложения..."
 # Очищаем временные атрибуты и карантин
 xattr -cr "$APP_DIR"
 
-# Подписываем стабильным сертификатом разработки или с явным Designated Requirement
+# 1. Создаем дистрибутивный архив SpatialAudio.zip с универсальной ad-hoc подписью (для работы на всех Mac с Apple Silicon arm64 и Intel x86_64)
+echo "📦 Сборка релизного архива SpatialAudio.zip (Universal 2: arm64 + x86_64)..."
+codesign --force --deep -s - "$APP_DIR"
+rm -f "$PROJECT_DIR/SpatialAudio.zip"
+ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$PROJECT_DIR/SpatialAudio.zip"
+
+# 2. Для локальной установки подписываем стабильным сертификатом разработки (чтобы macOS TCC не сбрасывал доступ к микрофону)
 if security find-identity -v -p codesigning | grep -q "SpatialAudio Local"; then
     echo "Используется локальный сертификат: SpatialAudio Local"
     codesign --force --deep -s "SpatialAudio Local" "$APP_DIR"
@@ -97,4 +103,4 @@ rm -rf "/Applications/SpatialAudio.app"
 cp -R "$APP_DIR" "/Applications/SpatialAudio.app"
 xattr -cr "/Applications/SpatialAudio.app"
 
-echo "✅ Приложение успешно собрано и установлено в /Applications/SpatialAudio.app"
+echo "✅ Приложение успешно собрано, упаковано в SpatialAudio.zip и установлено в /Applications/SpatialAudio.app"
