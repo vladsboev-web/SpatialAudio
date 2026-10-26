@@ -50,9 +50,16 @@ It places two virtual studio monitors in front of you in 3D space, moving the so
 | **CPU & RAM footprint** | 0% | High (background daemons) | **< 1% CPU, ~25 MB RAM (0% when paused)** |
 | **Price & Privacy** | Free | $20–$60 / Telemetry | **100% Free & Open Source** |
 
-### 📦 Installation (2 Minutes)
+### 📦 Installation (1-Line via Homebrew or Manual)
 
-#### Step 1: Install BlackHole 2ch (Virtual Audio Loopback Driver)
+#### Option A: 1-Command Install via Homebrew (Recommended)
+Automatically installs `BlackHole 2ch`, places `SpatialAudio.app` in `/Applications`, and clears macOS Gatekeeper quarantine:
+```bash
+brew install --cask vladsboev-web/tap/spatialaudio
+```
+
+#### Option B: Manual Installation
+##### Step 1: Install BlackHole 2ch (Virtual Audio Loopback Driver)
 SpatialAudio uses the open-source [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) driver to capture system audio losslessly:
 ```bash
 brew install blackhole-2ch
@@ -108,7 +115,13 @@ brew install blackhole-2ch
 
 ### 📦 Установка
 
-#### Вариант 1: Быстрая установка (Готовый релиз)
+#### Вариант 1: Установка в 1 команду через Homebrew (Рекомендуется)
+Автоматически установит драйвер `BlackHole 2ch`, скопирует `SpatialAudio.app` в `/Applications` и снимет карантин macOS Gatekeeper:
+```bash
+brew install --cask vladsboev-web/tap/spatialaudio
+```
+
+#### Вариант 2: Ручная установка (Готовый релиз)
 
 1. **Установите виртуальный аудиодрайвер BlackHole 2ch** (требуется для перехвата системного звука):
    ```bash
@@ -131,7 +144,7 @@ brew install blackhole-2ch
 4. **Доступ к микрофону**:
    При первом запуске разрешите доступ к микрофону — это необходимо macOS для чтения цифрового аудиопотока из виртуального драйвера `BlackHole 2ch`.
 
-#### Вариант 2: Сборка из исходников (Для разработчиков)
+#### Вариант 3: Сборка из исходников (Для разработчиков)
 
 ```bash
 git clone https://github.com/vladsboev-web/SpatialAudio.git
