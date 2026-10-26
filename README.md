@@ -9,7 +9,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013.0%2B-blue?logo=apple)](https://github.com/vladsboev-web/SpatialAudio/releases)
 [![Architecture](https://img.shields.io/badge/arch-Universal%202%20(Apple%20Silicon%20%26%20Intel)-success?logo=apple)](https://github.com/vladsboev-web/SpatialAudio/releases)
-[![DSP Engine](https://img.shields.io/badge/DSP-Apple%20HRTFHQ%20Binaural-purple)](Documentation/ARCHITECTURE.md)
+[![DSP Engine](https://img.shields.io/badge/DSP-Apple%20HRTFHQ%20Binaural-purple)](#-key-features)
 [![Download](https://img.shields.io/badge/download-Latest%20Release%20(.zip)-brightgreen)](https://github.com/vladsboev-web/SpatialAudio/releases/latest)
 
 [**🇺🇸 English**](#-english) · [**🇷🇺 Русский**](#-русский) · [**📦 Download / Скачать**](https://github.com/vladsboev-web/SpatialAudio/releases/latest)
@@ -77,19 +77,6 @@ brew install blackhole-2ch
 **Нативное пространственное стерео (Apple HRTFHQ) для любых Bluetooth и проводных наушников в macOS (Fixed Spatial Audio).**
 
 Приложение работает в строке меню (Menu Bar) macOS, перехватывает стереозвук системы через виртуальный аудиодрайвер `BlackHole 2ch`, обрабатывает его с использованием оригинального бинаурального алгоритма Apple `HRTFHQ` и выводит в ваши наушники или динамики с минимальной задержкой и идеальной синхронизацией видео и звука.
-
----
-
-### 📚 Полная документация
-
-Вся документация по архитектуре, коду, системным сценариям и истории разработки собрана в папке [Documentation/](Documentation/):
-
-- 📖 **[Руководство пользователя (USER_MANUAL.md)](Documentation/USER_MANUAL.md)**: Установка, настройка, горячее переключение источников.
-- 🏗 **[Архитектура и DSP (ARCHITECTURE.md)](Documentation/ARCHITECTURE.md)**: Математика буфера, HRTFHQ, архитектура Single Attenuation, расчет задержки.
-- 📁 **[Каталог структуры проекта (PROJECT_STRUCTURE.md)](Documentation/PROJECT_STRUCTURE.md)**: Полное описание всех файлов, классов и методов.
-- 🍏 **[Системная интеграция (SYSTEM_INTEGRATION.md)](Documentation/SYSTEM_INTEGRATION.md)**: CoreAudio, TCC (микрофон), сертификат разработчика.
-- 📜 **[Выжимка из диалога (DIALOG_HISTORY_AND_SOLUTIONS.md)](Documentation/DIALOG_HISTORY_AND_SOLUTIONS.md)**: История решения всех багов и технических вызовов.
-- 🗺 **[Дорожная карта (ROADMAP_NEXT_STEPS.md)](Documentation/ROADMAP_NEXT_STEPS.md)**: Задачи и идеи для дальнейшего развития.
 
 ---
 

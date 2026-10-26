@@ -29,3 +29,9 @@ xcuserdata/
 *.token
 *token*
 git.md
+
+# Internal Agent & Development Documentation (Local Only)
+GEMINI.md
+Documentation/
+*.html
+*_files/
