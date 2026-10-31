@@ -11,11 +11,10 @@ public func debugLog(_ message: String) {
 public final class AudioCoordinator: ObservableObject {
     public static let shared = AudioCoordinator()
     
-    private let leftRingBuffer = AudioRingBuffer(capacityPowerOfTwo: 15)
-    private let rightRingBuffer = AudioRingBuffer(capacityPowerOfTwo: 15)
+    private let ringBuffer = AudioRingBuffer(capacityPowerOfTwo: 15)
     
-    private lazy var captureUnit = AudioCaptureUnit(leftRingBuffer: leftRingBuffer, rightRingBuffer: rightRingBuffer)
-    private lazy var spatialEngine = SpatialEngine(leftRingBuffer: leftRingBuffer, rightRingBuffer: rightRingBuffer)
+    private lazy var captureUnit = AudioCaptureUnit(ringBuffer: ringBuffer)
+    private lazy var spatialEngine = SpatialEngine(ringBuffer: ringBuffer)
     
     private var isApplyingProfile: Bool = false
     
@@ -76,7 +75,6 @@ public final class AudioCoordinator: ObservableObject {
     private var blackHoleVolumeListenerBlock: AudioObjectPropertyListenerBlock?
     private var monitoredBlackHoleID: AudioDeviceID?
     private var deviceChangeDebounceWorkItem: DispatchWorkItem?
-    private var engineConfigChangeDebounceWorkItem: DispatchWorkItem?
     private var previousOutputDeviceID: AudioDeviceID?
     private var lastKnownHardwareDeviceIDs: Set<AudioDeviceID> = []
     private var pendingConnectedHeadphonesID: AudioDeviceID?
@@ -182,15 +180,33 @@ public final class AudioCoordinator: ObservableObject {
         self.currentSessionVolume = volume
         let devID = self.selectedOutputDeviceID
         guard devID != 0 else { return }
+        let isSettable = AudioDeviceHelper.isVolumeSettable(deviceID: devID)
         if isRunning || pendingTargetSystemDefaultID != nil || isConnectingHeadphones || isHandlingDeviceDisconnection {
-            let hwVolume: Float32 = (volume > 0.001) ? 1.0 : 0.0
-            let currentDevVol = AudioDeviceHelper.getDeviceVolume(deviceID: devID)
-            if currentDevVol == nil || abs((currentDevVol ?? 0) - hwVolume) > 0.01 {
-                let applied = AudioDeviceHelper.setDeviceVolume(deviceID: devID, volume: hwVolume)
-                debugLog("[AudioCoordinator] syncSessionVolumeToOutputs: active -> set devID=\(devID) to \(hwVolume), applied=\(applied)")
+            if isSettable {
+                let currentDevVol = AudioDeviceHelper.getDeviceVolume(deviceID: devID)
+                if currentDevVol == nil || abs((currentDevVol ?? 0) - volume) > 0.01 {
+                    let applied = AudioDeviceHelper.setDeviceVolume(deviceID: devID, volume: volume)
+                    debugLog("[AudioCoordinator] syncSessionVolumeToOutputs: devID=\(devID) -> set to \(volume), applied=\(applied)")
+                }
+                if volume > 0.005 {
+                    let bhID = self.monitoredBlackHoleID ?? AudioDeviceHelper.findBlackHoleDevice()?.id
+                    let db: Float32 = {
+                        if let bhID = bhID, let readDb = AudioDeviceHelper.getDeviceVolumeDecibels(deviceID: bhID) {
+                            return readDb
+                        }
+                        return 64.0 * (volume - 1.0)
+                    }()
+                    let scale = (db <= -64.0) ? 0.0 : pow(Float(10.0), -db / 20.0)
+                    spatialEngine.inputVolumeScale = min(2000.0, scale)
+                } else {
+                    spatialEngine.inputVolumeScale = 0.0
+                }
+            } else {
+                spatialEngine.inputVolumeScale = 1.0
             }
         } else {
             let applied = AudioDeviceHelper.setDeviceVolume(deviceID: devID, volume: volume)
+            spatialEngine.inputVolumeScale = 1.0
             debugLog("[AudioCoordinator] syncSessionVolumeToOutputs: inactive -> set devID=\(devID) to \(volume), applied=\(applied)")
         }
     }
@@ -357,8 +373,7 @@ public final class AudioCoordinator: ObservableObject {
         for delay in [0.6, 1.2, 2.0] {
             let item = DispatchWorkItem { [weak self] in
                 guard let self = self, self.isRunning, self.selectedOutputDeviceID == deviceID else { return }
-                let hwVolume: Float32 = (self.currentSessionVolume > 0.001) ? 1.0 : 0.0
-                AudioDeviceHelper.setDeviceVolume(deviceID: deviceID, volume: hwVolume)
+                AudioDeviceHelper.setDeviceVolume(deviceID: deviceID, volume: self.currentSessionVolume)
             }
             volumeReinforceWorkItems.append(item)
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
@@ -390,34 +405,6 @@ public final class AudioCoordinator: ObservableObject {
             DispatchQueue.main
         ) { [weak self] _, _ in
             self?.handleDefaultOutputDeviceChanged()
-        }
-        
-        NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let self = self, self.isRunning else { return }
-            // Игнорируем уведомления от старых или уже освобожденных экземпляров AVAudioEngine
-            if let senderEngine = notification.object as? AVAudioEngine,
-               senderEngine !== self.spatialEngine.currentEngine {
-                return
-            }
-            if self.isConnectingHeadphones || self.isHandlingDeviceDisconnection || self.deviceChangeDebounceWorkItem != nil {
-                debugLog("[AudioCoordinator] AVAudioEngineConfigurationChange ignored during hardware transition")
-                return
-            }
-            self.engineConfigChangeDebounceWorkItem?.cancel()
-            let workItem = DispatchWorkItem { [weak self] in
-                guard let self = self, self.isRunning else { return }
-                if self.isConnectingHeadphones || self.isHandlingDeviceDisconnection || self.deviceChangeDebounceWorkItem != nil {
-                    return
-                }
-                debugLog("[AudioCoordinator] AVAudioEngineConfigurationChange executing restart")
-                self.startPipeline(routeSystemAudio: false)
-            }
-            self.engineConfigChangeDebounceWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
         }
     }
     
@@ -584,13 +571,9 @@ public final class AudioCoordinator: ObservableObject {
                 
                 let bh = AudioDeviceHelper.findBlackHoleDevice()
                 if let bh = bh, currentDefault == bh.id {
-                    debugLog("[AudioCoordinator] BlackHole готов в macOS -> даем 200 мс на стабилизацию")
-                    statusMessage = L10n.connecting
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                        guard let self = self, !self.isRunning else { return }
-                        if let cur = AudioDeviceHelper.getDefaultOutputDeviceID(), cur == bh.id {
-                            self.startPipeline(routeSystemAudio: false)
-                        }
+                    debugLog("[AudioCoordinator] BlackHole готов в macOS -> немедленный старт пайплайна")
+                    if !self.isRunning {
+                        self.startPipeline(routeSystemAudio: false)
                     }
                     return
                 }
@@ -625,15 +608,8 @@ public final class AudioCoordinator: ObservableObject {
         if let bh = bh, currentDefault == bh.id {
             // 🟢 Сценарий 1: В системном меню macOS выбран BlackHole 2ch (запуск приложения пользователем)
             if !self.isRunning {
-                debugLog("[AudioCoordinator] В macOS выбран BlackHole -> даем 200 мс на стабилизацию системных потоков")
-                statusMessage = L10n.connecting
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                    guard let self = self, !self.isRunning else { return }
-                    if let cur = AudioDeviceHelper.getDefaultOutputDeviceID(), cur == bh.id {
-                        debugLog("[AudioCoordinator] Старт пайплайна после стабилизации")
-                        self.startPipeline(routeSystemAudio: false)
-                    }
-                }
+                debugLog("[AudioCoordinator] В macOS выбран BlackHole -> немедленный старт пайплайна")
+                self.startPipeline(routeSystemAudio: false)
             }
         } else {
             // Проверяем, не вызвано ли это событие подключением или отключением наушников,
@@ -726,14 +702,6 @@ public final class AudioCoordinator: ObservableObject {
         debugLog("[AudioCoordinator] routeSystemSoundToBlackHole: setting default to \(bh.id) with vol=\(currentSessionVolume)")
         AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
         
-        // Раскрываем аппаратный усилитель наушников в 1.0 ПОСЛЕ переключения дефолта на BlackHole,
-        // чтобы не было мгновенного удара 100% громкости прямого системного звука
-        if let nonBhDef = currentDef, nonBhDef != bh.id {
-            let hwVol: Float32 = (currentSessionVolume > 0.001) ? 1.0 : 0.0
-            AudioDeviceHelper.setDeviceVolume(deviceID: nonBhDef, volume: hwVol)
-            debugLog("[AudioCoordinator] routeSystemSoundToBlackHole: unlocked physical device \(nonBhDef) to \(hwVol) via AVRCP")
-        }
-        
         // Таймаут безопасности: запустить пайплайн через 0.6 сек, если системное событие задержалось
         safetyRoutingWorkItem?.cancel()
         let safetyItem = DispatchWorkItem { [weak self] in
@@ -813,8 +781,6 @@ public final class AudioCoordinator: ObservableObject {
         debugLog("[AudioCoordinator] pausePipeline called")
         pipelineRetryWorkItem?.cancel()
         pipelineRetryWorkItem = nil
-        engineConfigChangeDebounceWorkItem?.cancel()
-        engineConfigChangeDebounceWorkItem = nil
         cancelVolumeReinforcement()
         stopAudioUnitsOnly()
         isRunning = false
@@ -827,8 +793,6 @@ public final class AudioCoordinator: ObservableObject {
         debugLog("[AudioCoordinator] startPipeline(routeSystemAudio: \(routeSystemAudio))")
         pipelineRetryWorkItem?.cancel()
         pipelineRetryWorkItem = nil
-        engineConfigChangeDebounceWorkItem?.cancel()
-        engineConfigChangeDebounceWorkItem = nil
         
         stopAudioUnitsOnly()
         refreshDevices(preserveUserSelection: true)
@@ -878,8 +842,7 @@ public final class AudioCoordinator: ObservableObject {
         // 4. Синхронизируем частоту BlackHole с фактической частотой наушников
         AudioDeviceHelper.setSampleRate(deviceID: inDev.id, rate: sampleRate)
         
-        leftRingBuffer.reset()
-        rightRingBuffer.reset()
+        ringBuffer.reset()
         
         // 5. Настройка захвата
         guard captureUnit.setup(deviceID: inDev.id, sampleRate: sampleRate) else {
@@ -1005,10 +968,28 @@ public final class AudioCoordinator: ObservableObject {
     
     private func startLevelTimer() {
         guard levelTimer == nil, isRunning else { return }
-        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { [weak self] _ in
+        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.leftLevel = self.captureUnit.peakLevelL
-            self.rightLevel = self.captureUnit.peakLevelR
+            let scale = (self.spatialEngine.inputVolumeScale > 0) ? self.spatialEngine.inputVolumeScale : 1.0
+            let rawL = self.captureUnit.peakLevelL * scale
+            let rawR = self.captureUnit.peakLevelR * scale
+            
+            // Логарифмически-перцептивная шкала (корень из мощности, VU-стандарт)
+            let targetL = min(1.0, sqrt(max(0.0, rawL)))
+            let targetR = min(1.0, sqrt(max(0.0, rawR)))
+            
+            // Мгновенная атака на пиках, мягкий баллистический спад
+            if targetL >= self.leftLevel {
+                self.leftLevel = targetL
+            } else {
+                self.leftLevel = max(0.0, self.leftLevel * 0.78 + targetL * 0.22)
+            }
+            
+            if targetR >= self.rightLevel {
+                self.rightLevel = targetR
+            } else {
+                self.rightLevel = max(0.0, self.rightLevel * 0.78 + targetR * 0.22)
+            }
         }
     }
     

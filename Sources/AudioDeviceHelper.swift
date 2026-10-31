@@ -273,6 +273,22 @@ public final class AudioDeviceHelper {
         return nil
     }
     
+    /// Получить громкость устройства в децибелах (для точной компенсации кривой BlackHole)
+    public static func getDeviceVolumeDecibels(deviceID: AudioDeviceID) -> Float32? {
+        var db: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeDecibels,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(deviceID, &addr) {
+            let status = AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &db)
+            if status == noErr { return db }
+        }
+        return nil
+    }
+    
     /// Проверить, поддерживает ли устройство регулировку громкости на аппаратном уровне
     public static func isVolumeSettable(deviceID: AudioDeviceID) -> Bool {
         var addrVMVC = AudioObjectPropertyAddress(

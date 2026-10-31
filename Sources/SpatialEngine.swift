@@ -4,6 +4,98 @@ import AudioToolbox
 import AVFoundation
 import Accelerate
 
+/// Разводит один стерео-поток из кольцевого буфера на два пути рендера.
+/// Все колбэки вызываются в одном IO-потоке AVAudioEngine, поэтому дополнительная синхронизация не нужна.
+private final class StereoFeed {
+    static let maxFrames = 8192
+
+    let ring: AudioRingBuffer
+    /// true — звук идёт прямым путём (bypass), false — через 3D-сцену
+    var isBypass: Bool = false
+
+    private let stashL = UnsafeMutablePointer<Float>.allocate(capacity: StereoFeed.maxFrames)
+    private let stashR = UnsafeMutablePointer<Float>.allocate(capacity: StereoFeed.maxFrames)
+    private let rampBuf = UnsafeMutablePointer<Float>.allocate(capacity: StereoFeed.maxFrames)
+    private var stashFrames: Int = 0
+    private var consumedL: Bool = true
+    private var consumedR: Bool = true
+    
+    /// Масштаб громкости для компенсации ослабления BlackHole в Float32 до физического ЦАП
+    var volumeScale: Float = 1.0
+    private var currentScale: Float = 1.0
+
+    init(ring: AudioRingBuffer) {
+        self.ring = ring
+        stashL.initialize(repeating: 0, count: StereoFeed.maxFrames)
+        stashR.initialize(repeating: 0, count: StereoFeed.maxFrames)
+        rampBuf.initialize(repeating: 0, count: StereoFeed.maxFrames)
+    }
+
+    deinit {
+        stashL.deallocate()
+        stashR.deallocate()
+        rampBuf.deallocate()
+    }
+    
+    private func applyScale(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frames: Int) {
+        guard frames > 0 else { return }
+        let target = volumeScale
+        if frames >= 2 && abs(currentScale - target) > 0.0001 {
+            var start = currentScale
+            var end = target
+            vDSP_vgen(&start, &end, rampBuf, 1, vDSP_Length(frames))
+            vDSP_vmul(left, 1, rampBuf, 1, left, 1, vDSP_Length(frames))
+            vDSP_vmul(right, 1, rampBuf, 1, right, 1, vDSP_Length(frames))
+            currentScale = target
+        } else if abs(target - 1.0) > 0.0001 {
+            var scale = target
+            vDSP_vsmul(left, 1, &scale, left, 1, vDSP_Length(frames))
+            vDSP_vsmul(right, 1, &scale, right, 1, vDSP_Length(frames))
+            currentScale = target
+        } else {
+            currentScale = 1.0
+        }
+    }
+
+    /// Моно-канал для 3D-источника. Пара L/R читается из кольцевого буфера одним вызовом
+    /// и раздаётся двум моно-узлам — каналы остаются строго синхронными.
+    func fetchMono(channel: Int, into dst: UnsafeMutablePointer<Float>, frames: Int) {
+        guard !isBypass, frames <= StereoFeed.maxFrames else {
+            vDSP_vclr(dst, 1, vDSP_Length(frames))
+            return
+        }
+        let alreadyConsumed = (channel == 0) ? consumedL : consumedR
+        if alreadyConsumed || frames != stashFrames {
+            ring.read(left: stashL, right: stashR, count: frames)
+            applyScale(left: stashL, right: stashR, frames: frames)
+            stashFrames = frames
+            consumedL = false
+            consumedR = false
+        }
+        if channel == 0 {
+            dst.update(from: stashL, count: frames)
+            consumedL = true
+        } else {
+            dst.update(from: stashR, count: frames)
+            consumedR = true
+        }
+    }
+
+    /// Прямой стерео-путь (bypass): без 3D-сцены, без лимитера.
+    func fetchStereo(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frames: Int) {
+        guard isBypass else {
+            vDSP_vclr(left, 1, vDSP_Length(frames))
+            vDSP_vclr(right, 1, vDSP_Length(frames))
+            return
+        }
+        ring.read(left: left, right: right, count: frames)
+        applyScale(left: left, right: right, frames: frames)
+        // При следующем переключении в 3D начинаем с чистого состояния
+        consumedL = true
+        consumedR = true
+    }
+}
+
 public final class SpatialEngine {
     private var engine = AVAudioEngine()
     public var currentEngine: AVAudioEngine { engine }
@@ -12,9 +104,9 @@ public final class SpatialEngine {
     
     private var leftSourceNode: AVAudioSourceNode?
     private var rightSourceNode: AVAudioSourceNode?
+    private var bypassSourceNode: AVAudioSourceNode?
     
-    private let leftRingBuffer: AudioRingBuffer
-    private let rightRingBuffer: AudioRingBuffer
+    private let feed: StereoFeed
     
     public private(set) var isRunning: Bool = false
     public private(set) var sampleRate: Double = 44100.0
@@ -43,12 +135,18 @@ public final class SpatialEngine {
     }
     
     public var inputVolumeScale: Float = 1.0 {
-        didSet { updateVolume() }
+        didSet {
+            feed.volumeScale = inputVolumeScale
+        }
     }
     
+    /// Компенсация затухания HRTFHQ (+4 dB). Применяется ТОЛЬКО в 3D-цепочке через pre-gain лимитера,
+    /// прямой путь (bypass) остаётся с единичным усилением.
+    private let hrtfCompensationDB: Float = 4.0
+    
     private func updateVolume() {
-        let hrtfCompensation: Float = isSpatialEnabled ? 1.58 : 1.0 // +4.0 dB компенсация затухания HRTFHQ
-        engine.mainMixerNode.outputVolume = volume * inputVolumeScale * hrtfCompensation
+        // Главный микшер — общий для обоих путей; при volume = 1.0 это бит-в-бит прохождение
+        engine.mainMixerNode.outputVolume = volume
     }
     
     private func updateReverb() {
@@ -59,9 +157,8 @@ public final class SpatialEngine {
         right.reverbBlend = blendVal
     }
     
-    public init(leftRingBuffer: AudioRingBuffer, rightRingBuffer: AudioRingBuffer) {
-        self.leftRingBuffer = leftRingBuffer
-        self.rightRingBuffer = rightRingBuffer
+    public init(ringBuffer: AudioRingBuffer) {
+        self.feed = StereoFeed(ring: ringBuffer)
     }
     
     deinit {
@@ -71,14 +168,12 @@ public final class SpatialEngine {
     private func teardownCurrentGraph() {
         stop()
         engine.stop()
-        if let left = leftSourceNode {
-            if left.engine != nil { engine.detach(left) }
-            leftSourceNode = nil
+        for node in [leftSourceNode, rightSourceNode, bypassSourceNode] {
+            if let node = node, node.engine != nil { engine.detach(node) }
         }
-        if let right = rightSourceNode {
-            if right.engine != nil { engine.detach(right) }
-            rightSourceNode = nil
-        }
+        leftSourceNode = nil
+        rightSourceNode = nil
+        bypassSourceNode = nil
         if let lim = limiterNode {
             if lim.engine != nil { engine.detach(lim) }
             limiterNode = nil
@@ -94,6 +189,14 @@ public final class SpatialEngine {
         teardownCurrentGraph()
         self.engine = AVAudioEngine()
         self.environment = AVAudioEnvironmentNode()
+    }
+    
+    private func configureLimiter(_ limiter: AVAudioUnitEffect) {
+        let au = limiter.audioUnit
+        // Более плавное восстановление — меньше искажений на басу и «пампинга»
+        AudioUnitSetParameter(au, kLimiterParam_AttackTime, kAudioUnitScope_Global, 0, 0.007, 0)
+        AudioUnitSetParameter(au, kLimiterParam_DecayTime, kAudioUnitScope_Global, 0, 0.05, 0)
+        AudioUnitSetParameter(au, kLimiterParam_PreGain, kAudioUnitScope_Global, 0, hrtfCompensationDB, 0)
     }
     
     public func setup(outputDeviceID: AudioDeviceID, sampleRate: Double = 44100.0) -> Bool {
@@ -128,7 +231,15 @@ public final class SpatialEngine {
             }
         }
         
-        let hwFormat = engine.outputNode.outputFormat(forBus: 0)
+        var hwFormat = engine.outputNode.outputFormat(forBus: 0)
+        if hwFormat.channelCount == 0 {
+            // Быстрое ожидание готовности потока Bluetooth (до 150 мс с шагом 30 мс)
+            for _ in 0..<5 {
+                usleep(30_000)
+                hwFormat = engine.outputNode.outputFormat(forBus: 0)
+                if hwFormat.channelCount > 0 { break }
+            }
+        }
         guard hwFormat.channelCount > 0 else {
             print("[SpatialEngine] Выходной поток устройства \(outputDeviceID) ещё не готов (0 каналов)")
             return false
@@ -142,7 +253,7 @@ public final class SpatialEngine {
         // Дистанция колонок меняет геометрию сцены, задержку и акустику, но уровень громкости не затухает!
         environment.distanceAttenuationParameters.rolloffFactor = 0.0
         
-        // 2. Создаем системный Peak Limiter от Apple для исключения перегрузок и хрипов
+        // 2. Системный Peak Limiter от Apple — только для 3D-цепочки (страховка после +4 dB компенсации HRTF)
         let limiterDesc = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: kAudioUnitSubType_PeakLimiter,
@@ -153,6 +264,7 @@ public final class SpatialEngine {
         let limiter = AVAudioUnitEffect(audioComponentDescription: limiterDesc)
         self.limiterNode = limiter
         engine.attach(limiter)
+        configureLimiter(limiter)
         
         guard let monoFormat = AVAudioFormat(standardFormatWithSampleRate: actualRate, channels: 1),
               let stereoFormat = AVAudioFormat(standardFormatWithSampleRate: actualRate, channels: 2) else {
@@ -160,46 +272,58 @@ public final class SpatialEngine {
             return false
         }
         
-        let lRing = self.leftRingBuffer
-        let rRing = self.rightRingBuffer
+        let feed = self.feed
         
-        // 3. Левый виртуальный источник
-        let leftNode = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
-            guard let buffers = audioBufferList.pointee.mBuffers.mData else { return noErr }
-            let ptr = buffers.assumingMemoryBound(to: Float.self)
-            lRing.read(into: ptr, count: Int(frameCount))
+        // 3. Левый виртуальный источник (3D)
+        let leftNode = AVAudioSourceNode(format: monoFormat) { _, _, frameCount, audioBufferList -> OSStatus in
+            let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            guard let data = abl[0].mData else { return noErr }
+            feed.fetchMono(channel: 0, into: data.assumingMemoryBound(to: Float.self), frames: Int(frameCount))
             return noErr
         }
         
-        // 4. Правый виртуальный источник
-        let rightNode = AVAudioSourceNode { _, _, frameCount, audioBufferList -> OSStatus in
-            guard let buffers = audioBufferList.pointee.mBuffers.mData else { return noErr }
-            let ptr = buffers.assumingMemoryBound(to: Float.self)
-            rRing.read(into: ptr, count: Int(frameCount))
+        // 4. Правый виртуальный источник (3D)
+        let rightNode = AVAudioSourceNode(format: monoFormat) { _, _, frameCount, audioBufferList -> OSStatus in
+            let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            guard let data = abl[0].mData else { return noErr }
+            feed.fetchMono(channel: 1, into: data.assumingMemoryBound(to: Float.self), frames: Int(frameCount))
+            return noErr
+        }
+        
+        // 5. Прямой стерео-источник (Bypass): мимо 3D-сцены и лимитера, единичное усиление
+        let bypassNode = AVAudioSourceNode(format: stereoFormat) { _, _, frameCount, audioBufferList -> OSStatus in
+            let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            guard abl.count >= 2,
+                  let l = abl[0].mData?.assumingMemoryBound(to: Float.self),
+                  let r = abl[1].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+            feed.fetchStereo(left: l, right: r, frames: Int(frameCount))
             return noErr
         }
         
         self.leftSourceNode = leftNode
         self.rightSourceNode = rightNode
+        self.bypassSourceNode = bypassNode
         
         engine.attach(leftNode)
         engine.attach(rightNode)
+        engine.attach(bypassNode)
         
+        // Цепочки обработки:
+        //   3D:     L/R (моно) -> Окружение (HRTF) -> Peak Limiter (+4 dB pre-gain) -> Главный микшер -> Выход
+        //   Bypass: Стерео -----------------------------------------------------> Главный микшер -> Выход
         engine.connect(leftNode, to: environment, format: monoFormat)
         engine.connect(rightNode, to: environment, format: monoFormat)
+        engine.connect(environment, to: limiter, format: stereoFormat)
+        engine.connect(limiter, to: engine.mainMixerNode, format: stereoFormat)
+        engine.connect(bypassNode, to: engine.mainMixerNode, format: stereoFormat)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: stereoFormat)
         
-        // Цепочка обработки:
-        // Окружение (3D сцена) -> Главный микшер (Master Volume) -> Peak Limiter (аварийный предохранитель на выходе) -> Выход
-        engine.connect(environment, to: engine.mainMixerNode, format: stereoFormat)
-        engine.connect(engine.mainMixerNode, to: limiter, format: stereoFormat)
-        engine.connect(limiter, to: engine.outputNode, format: stereoFormat)
-        
-        // 5. Акустика комнаты (натуральная комната прослушивания)
+        // 6. Акустика комнаты (натуральная комната прослушивания)
         environment.reverbParameters.enable = true
         environment.reverbParameters.loadFactoryReverbPreset(.smallRoom)
         environment.reverbParameters.level = 0.0
         
-        // 6. Позиция слушателя
+        // 7. Позиция слушателя
         environment.listenerPosition = AVAudio3DPoint(x: 0, y: 0, z: 0)
         environment.listenerAngularOrientation = AVAudio3DAngularOrientation(yaw: 0, pitch: 0, roll: 0)
         
@@ -209,30 +333,21 @@ public final class SpatialEngine {
     }
     
     public func updateAlgorithmAndPositions() {
+        // Переключение пути рендера (атомарно для IO-потока: читается один Bool в начале колбэка)
+        feed.isBypass = !isSpatialEnabled
+        
         guard let left = leftSourceNode, let right = rightSourceNode else { return }
         
-        if isSpatialEnabled {
-            // Настоящий Apple HRTFHQ алгоритм
-            left.renderingAlgorithm = .HRTFHQ
-            right.renderingAlgorithm = .HRTFHQ
-            
-            let rad = speakerAngleDeg * .pi / 180.0
-            let x = distance * sin(rad)
-            let z = -distance * cos(rad)
-            
-            left.position = AVAudio3DPoint(x: -x, y: 0.0, z: z)
-            right.position = AVAudio3DPoint(x: x, y: 0.0, z: z)
-            
-            left.pan = 0.0
-            right.pan = 0.0
-        } else {
-            // Обычное стерео
-            left.renderingAlgorithm = .equalPowerPanning
-            right.renderingAlgorithm = .equalPowerPanning
-            
-            left.pan = -1.0
-            right.pan = 1.0
-        }
+        // Настоящий Apple HRTFHQ алгоритм (в режиме Bypass 3D-источники просто получают тишину)
+        left.renderingAlgorithm = .HRTFHQ
+        right.renderingAlgorithm = .HRTFHQ
+        
+        let rad = speakerAngleDeg * .pi / 180.0
+        let x = distance * sin(rad)
+        let z = -distance * cos(rad)
+        
+        left.position = AVAudio3DPoint(x: -x, y: 0.0, z: z)
+        right.position = AVAudio3DPoint(x: x, y: 0.0, z: z)
         
         updateReverb()
         updateVolume()

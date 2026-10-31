@@ -6,8 +6,7 @@ import Accelerate
 
 public final class AudioCaptureUnit {
     private var audioUnit: AudioComponentInstance?
-    private let leftRingBuffer: AudioRingBuffer
-    private let rightRingBuffer: AudioRingBuffer
+    private let ringBuffer: AudioRingBuffer
     
     public private(set) var isRunning: Bool = false
     public private(set) var sampleRate: Double = 44100.0
@@ -27,9 +26,8 @@ public final class AudioCaptureUnit {
     }
     private var context = Context()
     
-    public init(leftRingBuffer: AudioRingBuffer, rightRingBuffer: AudioRingBuffer) {
-        self.leftRingBuffer = leftRingBuffer
-        self.rightRingBuffer = rightRingBuffer
+    public init(ringBuffer: AudioRingBuffer) {
+        self.ringBuffer = ringBuffer
         self.context.captureUnit = self
     }
     
@@ -155,15 +153,14 @@ public final class AudioCaptureUnit {
                         )
                         
                         if st == noErr {
-                            unit.leftRingBuffer.write(lPtr.baseAddress!, count: frames)
-                            unit.rightRingBuffer.write(rPtr.baseAddress!, count: frames)
+                            unit.ringBuffer.write(left: lPtr.baseAddress!, right: rPtr.baseAddress!, count: frames)
                             
                             var maxL: Float = 0.0
                             var maxR: Float = 0.0
                             vDSP_maxmgv(lPtr.baseAddress!, 1, &maxL, vDSP_Length(frames))
                             vDSP_maxmgv(rPtr.baseAddress!, 1, &maxR, vDSP_Length(frames))
-                            unit.peakLevelL = max(unit.peakLevelL * 0.9, maxL)
-                            unit.peakLevelR = max(unit.peakLevelR * 0.9, maxR)
+                            unit.peakLevelL = max(unit.peakLevelL * 0.95, maxL)
+                            unit.peakLevelR = max(unit.peakLevelR * 0.95, maxR)
                         }
                     }
                 }

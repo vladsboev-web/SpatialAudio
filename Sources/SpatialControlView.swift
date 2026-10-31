@@ -561,7 +561,7 @@ struct AudioLevelMeter: View {
                         )
                     )
                     .frame(width: max(0, min(geo.size.width, geo.size.width * CGFloat(level))))
-                    .animation(.linear(duration: 0.05), value: level)
+                    .animation(.linear(duration: 0.04), value: level)
             }
         }
         .frame(height: 6)
