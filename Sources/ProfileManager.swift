@@ -9,6 +9,8 @@ public struct SpatialProfile: Identifiable, Codable, Equatable {
     public var reverbBlend: Double
     public var volume: Double
     public var gainMultiplier: Double?
+    public var isSpeakerMode: Bool? = false
+    public var physicalSpeakerAngleDeg: Double? = 22.5
     
     public init(
         id: UUID = UUID(),
@@ -18,7 +20,9 @@ public struct SpatialProfile: Identifiable, Codable, Equatable {
         distance: Double? = 1.0,
         reverbBlend: Double = 0.01,
         volume: Double = 1.0,
-        gainMultiplier: Double? = 1.0
+        gainMultiplier: Double? = 1.0,
+        isSpeakerMode: Bool? = false,
+        physicalSpeakerAngleDeg: Double? = 22.5
     ) {
         self.id = id
         self.name = name
@@ -28,93 +32,218 @@ public struct SpatialProfile: Identifiable, Codable, Equatable {
         self.reverbBlend = reverbBlend
         self.volume = volume
         self.gainMultiplier = gainMultiplier
+        self.isSpeakerMode = isSpeakerMode ?? false
+        self.physicalSpeakerAngleDeg = physicalSpeakerAngleDeg ?? 22.5
     }
 }
 
 public final class ProfileManager: ObservableObject {
     public static let shared = ProfileManager()
     
-    private let profilesKey = "SpatialAudio_Profiles_List"
-    private let activeProfileIDKey = "SpatialAudio_Active_Profile_ID"
+    // Раздельные хранилища профилей для режима Наушников и режима Колонок
+    private let headphoneProfilesKey = "SpatialAudio_Headphone_Profiles_List"
+    private let activeHeadphoneProfileIDKey = "SpatialAudio_Active_Headphone_Profile_ID"
+    private let speakerProfilesKey = "SpatialAudio_Speaker_Profiles_List"
+    private let activeSpeakerProfileIDKey = "SpatialAudio_Active_Speaker_Profile_ID"
+    private let lastActiveModeKey = "SpatialAudio_Last_Active_SpeakerMode"
     
-    @Published public var profiles: [SpatialProfile] = []
-    @Published public var activeProfileID: UUID = UUID()
+    // Legacy-ключи для мягкой миграции старых профилей
+    private let legacyProfilesKey = "SpatialAudio_Profiles_List"
+    private let legacyActiveProfileIDKey = "SpatialAudio_Active_Profile_ID"
     
+    @Published public var headphoneProfiles: [SpatialProfile] = []
+    @Published public var activeHeadphoneProfileID: UUID = UUID()
+    
+    @Published public var speakerProfiles: [SpatialProfile] = []
+    @Published public var activeSpeakerProfileID: UUID = UUID()
+    
+    /// Текущий выбранный режим (false = Наушники, true = Колонки), синхронизированный со списком профилей
+    @Published public var currentModeIsSpeaker: Bool = false
+    
+    /// Профили текущего активного режима (Наушники или Колонки)
+    public var profiles: [SpatialProfile] {
+        currentModeIsSpeaker ? speakerProfiles : headphoneProfiles
+    }
+    
+    /// ID активного профиля в текущем режиме
+    public var activeProfileID: UUID {
+        currentModeIsSpeaker ? activeSpeakerProfileID : activeHeadphoneProfileID
+    }
+    
+    /// Активный профиль текущего режима
     public var activeProfile: SpatialProfile? {
-        profiles.first(where: { $0.id == activeProfileID }) ?? profiles.first
+        let list = profiles
+        let targetID = activeProfileID
+        return list.first(where: { $0.id == targetID }) ?? list.first
     }
     
     private init() {
         loadProfiles()
     }
     
+    private static func makeDefaultHeadphoneProfile(isRU: Bool) -> SpatialProfile {
+        SpatialProfile(
+            name: isRU ? "Стандартный" : "Default",
+            isSpatialEnabled: true,
+            speakerAngleDeg: 30.0,
+            distance: 1.0,
+            reverbBlend: 0.01,
+            volume: 1.0,
+            gainMultiplier: 1.0,
+            isSpeakerMode: false,
+            physicalSpeakerAngleDeg: 22.5
+        )
+    }
+    
+    private static func makeDefaultSpeakerProfile(isRU: Bool) -> SpatialProfile {
+        SpatialProfile(
+            name: isRU ? "Стандартный" : "Default",
+            isSpatialEnabled: true,
+            speakerAngleDeg: 30.0,
+            distance: 1.0,
+            reverbBlend: 0.01,
+            volume: 1.0,
+            gainMultiplier: 1.0,
+            isSpeakerMode: true,
+            physicalSpeakerAngleDeg: 22.5
+        )
+    }
+    
+    private static let defaultProfileNames: Set<String> = ["Основной", "Стандартный", "Default"]
+    
+    private static func normalizeDefaultName(_ name: String, isRU: Bool) -> String {
+        if defaultProfileNames.contains(name) {
+            return isRU ? "Стандартный" : "Default"
+        }
+        return name
+    }
+    
     public func loadProfiles() {
-        if let data = UserDefaults.standard.data(forKey: profilesKey),
-           let decoded = try? JSONDecoder().decode([SpatialProfile].self, from: data),
-           !decoded.isEmpty {
-            self.profiles = decoded
-            // Миграция старых значений реверберации (> 3%)
-            var didMigrate = false
-            for i in 0..<self.profiles.count {
-                if self.profiles[i].reverbBlend > 0.03 {
-                    // Если стояло старое значение по умолчанию 6%, переводим на новое 1%
-                    if abs(self.profiles[i].reverbBlend - 0.06) < 0.005 {
-                        self.profiles[i].reverbBlend = 0.01
-                    } else {
-                        self.profiles[i].reverbBlend = min(0.03, self.profiles[i].reverbBlend)
-                    }
-                    didMigrate = true
-                }
-            }
-            if didMigrate {
-                saveProfiles()
-            }
-        } else {
-            // Создаем единственный чистый начальный профиль без предустановок
-            let isRU = (Locale.preferredLanguages.first?.lowercased().hasPrefix("ru") == true)
-            let defaultProfile = SpatialProfile(
-                name: isRU ? "Основной" : "Default",
-                isSpatialEnabled: true,
-                speakerAngleDeg: 30.0,
-                distance: 1.0,
-                reverbBlend: 0.01,
-                volume: 1.0,
-                gainMultiplier: 1.0
-            )
-            self.profiles = [defaultProfile]
-            saveProfiles()
+        let isRU = (Locale.preferredLanguages.first?.lowercased().hasPrefix("ru") == true)
+        let defaults = UserDefaults.standard
+        
+        if defaults.object(forKey: lastActiveModeKey) != nil {
+            self.currentModeIsSpeaker = defaults.bool(forKey: lastActiveModeKey)
         }
         
-        if let savedIDString = UserDefaults.standard.string(forKey: activeProfileIDKey),
-           let savedUUID = UUID(uuidString: savedIDString),
-           profiles.contains(where: { $0.id == savedUUID }) {
-            self.activeProfileID = savedUUID
-        } else if let first = profiles.first {
-            self.activeProfileID = first.id
-            UserDefaults.standard.set(first.id.uuidString, forKey: activeProfileIDKey)
+        var loadedHP: [SpatialProfile] = []
+        var loadedSP: [SpatialProfile] = []
+        
+        if let hpData = defaults.data(forKey: headphoneProfilesKey),
+           let decodedHP = try? JSONDecoder().decode([SpatialProfile].self, from: hpData),
+           !decodedHP.isEmpty {
+            loadedHP = decodedHP
         }
+        
+        if let spData = defaults.data(forKey: speakerProfilesKey),
+           let decodedSP = try? JSONDecoder().decode([SpatialProfile].self, from: spData),
+           !decodedSP.isEmpty {
+            loadedSP = decodedSP
+        }
+        
+        // Миграция из старого единого списка, если новые списки ещё не созданы
+        if loadedHP.isEmpty && loadedSP.isEmpty,
+           let legacyData = defaults.data(forKey: legacyProfilesKey),
+           let legacyDecoded = try? JSONDecoder().decode([SpatialProfile].self, from: legacyData),
+           !legacyDecoded.isEmpty {
+            for var p in legacyDecoded {
+                p.reverbBlend = min(0.03, max(0.0, p.reverbBlend > 0.03 ? 0.01 : p.reverbBlend))
+                p.name = Self.normalizeDefaultName(p.name, isRU: isRU)
+                if p.isSpeakerMode == true {
+                    loadedSP.append(p)
+                } else {
+                    p.isSpeakerMode = false
+                    loadedHP.append(p)
+                }
+            }
+        }
+        
+        // Гарантируем наличие индивидуального профиля «Стандартный» для Наушников
+        if loadedHP.isEmpty {
+            loadedHP = [Self.makeDefaultHeadphoneProfile(isRU: isRU)]
+        } else {
+            for i in 0..<loadedHP.count {
+                loadedHP[i].isSpeakerMode = false
+                loadedHP[i].reverbBlend = min(0.03, max(0.0, loadedHP[i].reverbBlend))
+                loadedHP[i].name = Self.normalizeDefaultName(loadedHP[i].name, isRU: isRU)
+            }
+        }
+        
+        // Гарантируем наличие индивидуального профиля «Стандартный» для Колонок
+        if loadedSP.isEmpty {
+            loadedSP = [Self.makeDefaultSpeakerProfile(isRU: isRU)]
+        } else {
+            for i in 0..<loadedSP.count {
+                loadedSP[i].isSpeakerMode = true
+                loadedSP[i].reverbBlend = min(0.03, max(0.0, loadedSP[i].reverbBlend))
+                loadedSP[i].name = Self.normalizeDefaultName(loadedSP[i].name, isRU: isRU)
+            }
+        }
+        
+        self.headphoneProfiles = loadedHP
+        self.speakerProfiles = loadedSP
+        
+        if let savedHPIDStr = defaults.string(forKey: activeHeadphoneProfileIDKey),
+           let savedHPUUID = UUID(uuidString: savedHPIDStr),
+           loadedHP.contains(where: { $0.id == savedHPUUID }) {
+            self.activeHeadphoneProfileID = savedHPUUID
+        } else if let legacyIDStr = defaults.string(forKey: legacyActiveProfileIDKey),
+                  let legacyUUID = UUID(uuidString: legacyIDStr),
+                  loadedHP.contains(where: { $0.id == legacyUUID }) {
+            self.activeHeadphoneProfileID = legacyUUID
+        } else if let firstHP = loadedHP.first {
+            self.activeHeadphoneProfileID = firstHP.id
+        }
+        
+        if let savedSPIDStr = defaults.string(forKey: activeSpeakerProfileIDKey),
+           let savedSPUUID = UUID(uuidString: savedSPIDStr),
+           loadedSP.contains(where: { $0.id == savedSPUUID }) {
+            self.activeSpeakerProfileID = savedSPUUID
+        } else if let firstSP = loadedSP.first {
+            self.activeSpeakerProfileID = firstSP.id
+        }
+        
+        saveProfiles()
     }
     
     public func saveProfiles() {
-        if let data = try? JSONEncoder().encode(profiles) {
-            UserDefaults.standard.set(data, forKey: profilesKey)
+        let defaults = UserDefaults.standard
+        if let hpData = try? JSONEncoder().encode(headphoneProfiles) {
+            defaults.set(hpData, forKey: headphoneProfilesKey)
         }
-        UserDefaults.standard.set(activeProfileID.uuidString, forKey: activeProfileIDKey)
+        if let spData = try? JSONEncoder().encode(speakerProfiles) {
+            defaults.set(spData, forKey: speakerProfilesKey)
+        }
+        defaults.set(activeHeadphoneProfileID.uuidString, forKey: activeHeadphoneProfileIDKey)
+        defaults.set(activeSpeakerProfileID.uuidString, forKey: activeSpeakerProfileIDKey)
+        defaults.set(currentModeIsSpeaker, forKey: lastActiveModeKey)
     }
     
-    // MARK: - CRUD операции
+    /// Переключение активного набора профилей при смене режима Наушники <-> Колонки
+    @discardableResult
+    public func switchMode(isSpeakerMode: Bool) -> SpatialProfile? {
+        if currentModeIsSpeaker != isSpeakerMode {
+            currentModeIsSpeaker = isSpeakerMode
+            UserDefaults.standard.set(isSpeakerMode, forKey: lastActiveModeKey)
+        }
+        return activeProfile
+    }
     
-    /// Create: Создание нового профиля (копирует текущие настройки пользователя)
+    // MARK: - CRUD операции (индивидуально для активного режима Наушники или Колонки)
+    
     @discardableResult
     public func createProfile(
         name: String,
         isSpatialEnabled: Bool = true,
         speakerAngleDeg: Double = 30.0,
         reverbBlend: Double = 0.01,
-        volume: Double = 1.0
+        volume: Double = 1.0,
+        isSpeakerMode: Bool = false,
+        physicalSpeakerAngleDeg: Double = 22.5
     ) -> SpatialProfile {
+        let currentList = isSpeakerMode ? speakerProfiles : headphoneProfiles
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let finalName = trimmed.isEmpty ? L10n.newProfileDefaultName(profiles.count + 1) : trimmed
+        let finalName = trimmed.isEmpty ? L10n.newProfileDefaultName(currentList.count + 1) : trimmed
         
         let newProfile = SpatialProfile(
             name: finalName,
@@ -123,55 +252,90 @@ public final class ProfileManager: ObservableObject {
             distance: 1.0,
             reverbBlend: min(0.03, max(0.0, reverbBlend)),
             volume: volume,
-            gainMultiplier: 1.0
+            gainMultiplier: 1.0,
+            isSpeakerMode: isSpeakerMode,
+            physicalSpeakerAngleDeg: physicalSpeakerAngleDeg
         )
         
-        profiles.append(newProfile)
-        activeProfileID = newProfile.id
+        if isSpeakerMode {
+            speakerProfiles.append(newProfile)
+            activeSpeakerProfileID = newProfile.id
+        } else {
+            headphoneProfiles.append(newProfile)
+            activeHeadphoneProfileID = newProfile.id
+        }
         saveProfiles()
         return newProfile
     }
     
-    /// Read / Select: Выбор профиля
     public func selectProfile(id: UUID) {
-        guard profiles.contains(where: { $0.id == id }) else { return }
-        activeProfileID = id
-        UserDefaults.standard.set(id.uuidString, forKey: activeProfileIDKey)
+        if currentModeIsSpeaker {
+            guard speakerProfiles.contains(where: { $0.id == id }) else { return }
+            activeSpeakerProfileID = id
+            UserDefaults.standard.set(id.uuidString, forKey: activeSpeakerProfileIDKey)
+        } else {
+            guard headphoneProfiles.contains(where: { $0.id == id }) else { return }
+            activeHeadphoneProfileID = id
+            UserDefaults.standard.set(id.uuidString, forKey: activeHeadphoneProfileIDKey)
+        }
     }
     
-    /// Update: Сохранение настроек в активный профиль при движении ползунков
     public func updateActiveProfileSettings(
         isSpatialEnabled: Bool,
         speakerAngleDeg: Double,
         reverbBlend: Double,
-        volume: Double
+        volume: Double,
+        isSpeakerMode: Bool = false,
+        physicalSpeakerAngleDeg: Double = 22.5
     ) {
-        guard let index = profiles.firstIndex(where: { $0.id == activeProfileID }) else { return }
-        profiles[index].isSpatialEnabled = isSpatialEnabled
-        profiles[index].speakerAngleDeg = speakerAngleDeg
-        profiles[index].reverbBlend = min(0.03, max(0.0, reverbBlend))
-        profiles[index].volume = volume
+        if isSpeakerMode {
+            guard let index = speakerProfiles.firstIndex(where: { $0.id == activeSpeakerProfileID }) else { return }
+            speakerProfiles[index].isSpatialEnabled = isSpatialEnabled
+            speakerProfiles[index].reverbBlend = min(0.03, max(0.0, reverbBlend))
+            speakerProfiles[index].volume = volume
+            speakerProfiles[index].isSpeakerMode = true
+            speakerProfiles[index].physicalSpeakerAngleDeg = physicalSpeakerAngleDeg
+        } else {
+            guard let index = headphoneProfiles.firstIndex(where: { $0.id == activeHeadphoneProfileID }) else { return }
+            headphoneProfiles[index].isSpatialEnabled = isSpatialEnabled
+            headphoneProfiles[index].speakerAngleDeg = speakerAngleDeg
+            headphoneProfiles[index].reverbBlend = min(0.03, max(0.0, reverbBlend))
+            headphoneProfiles[index].volume = volume
+            headphoneProfiles[index].isSpeakerMode = false
+        }
         saveProfiles()
     }
     
-    /// Update: Переименование профиля
     public func renameProfile(id: UUID, newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let index = profiles.firstIndex(where: { $0.id == id }) else { return }
-        profiles[index].name = trimmed
+        guard !trimmed.isEmpty else { return }
+        if currentModeIsSpeaker {
+            guard let index = speakerProfiles.firstIndex(where: { $0.id == id }) else { return }
+            speakerProfiles[index].name = trimmed
+        } else {
+            guard let index = headphoneProfiles.firstIndex(where: { $0.id == id }) else { return }
+            headphoneProfiles[index].name = trimmed
+        }
         saveProfiles()
     }
     
     /// Автоматический перевод имени стандартного профиля при переключении языка RU <-> EN
     public func localizeDefaultProfileNameIfNeeded(for lang: AppLanguage) {
+        let isRU = (lang == .ru)
         var changed = false
-        for i in 0..<profiles.count {
-            if profiles[i].name == "Основной" || profiles[i].name == "Default" {
-                let targetName = (lang == .ru) ? "Основной" : "Default"
-                if profiles[i].name != targetName {
-                    profiles[i].name = targetName
-                    changed = true
-                }
+        
+        for i in 0..<headphoneProfiles.count {
+            let normalized = Self.normalizeDefaultName(headphoneProfiles[i].name, isRU: isRU)
+            if headphoneProfiles[i].name != normalized {
+                headphoneProfiles[i].name = normalized
+                changed = true
+            }
+        }
+        for i in 0..<speakerProfiles.count {
+            let normalized = Self.normalizeDefaultName(speakerProfiles[i].name, isRU: isRU)
+            if speakerProfiles[i].name != normalized {
+                speakerProfiles[i].name = normalized
+                changed = true
             }
         }
         if changed {
@@ -179,19 +343,25 @@ public final class ProfileManager: ObservableObject {
         }
     }
     
-    /// Delete: Удаление профиля (минимум 1 профиль всегда сохраняется)
     @discardableResult
     public func deleteProfile(id: UUID) -> Bool {
-        guard profiles.count > 1 else { return false }
-        guard let index = profiles.firstIndex(where: { $0.id == id }) else { return false }
-        
-        profiles.remove(at: index)
-        
-        if activeProfileID == id {
-            let nextIndex = min(index, profiles.count - 1)
-            activeProfileID = profiles[nextIndex].id
+        if currentModeIsSpeaker {
+            guard speakerProfiles.count > 1,
+                  let index = speakerProfiles.firstIndex(where: { $0.id == id }) else { return false }
+            speakerProfiles.remove(at: index)
+            if activeSpeakerProfileID == id {
+                let nextIndex = min(index, speakerProfiles.count - 1)
+                activeSpeakerProfileID = speakerProfiles[nextIndex].id
+            }
+        } else {
+            guard headphoneProfiles.count > 1,
+                  let index = headphoneProfiles.firstIndex(where: { $0.id == id }) else { return false }
+            headphoneProfiles.remove(at: index)
+            if activeHeadphoneProfileID == id {
+                let nextIndex = min(index, headphoneProfiles.count - 1)
+                activeHeadphoneProfileID = headphoneProfiles[nextIndex].id
+            }
         }
-        
         saveProfiles()
         return true
     }

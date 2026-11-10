@@ -9,6 +9,7 @@ public struct AudioDevice: Identifiable, Hashable {
     public let hasOutput: Bool
     public let sampleRate: Double
     public let transportType: UInt32
+    public let dataSourceID: UInt32
     
     public var isBluetooth: Bool {
         return transportType == kAudioDeviceTransportTypeBluetooth ||
@@ -32,17 +33,38 @@ public struct AudioDevice: Identifiable, Hashable {
     
     public var isHeadphones: Bool {
         if isBluetooth { return true }
+        // Проводные наушники на встроенном кодеке Mac ('hdpn' = 0x6864706e)
+        if dataSourceID == 0x6864706e { return true }
         let n = name.lowercased()
-        let keywords = ["airpod", "headphone", "headset", "earphone", "buds", "wh-", "wf-", "ugreen", "bose", "sony", "beats", "sennheiser", "jbl", "shure", "anker", "soundcore"]
+        let keywords = [
+            "airpod", "headphone", "headset", "earphone", "buds", "beats",
+            "wh-", "wf-", "ugreen", "bose", "sony", "sennheiser", "jbl",
+            "shure", "anker", "soundcore", "marshall", "edifier", "akg",
+            "beyerdynamic", "audio-technica", "nothing", "galaxy", "pixel",
+            "наушник", "гарнитур"
+        ]
         return keywords.contains { n.contains($0) }
+    }
+    
+    /// Является ли устройство внешним / подключаемым носителем (Bluetooth, наушники, USB, DisplayPort/HDMI и т.д.)
+    public var isHotPluggableOutput: Bool {
+        return hasOutput && !isVirtual && !isInternalAggregate && (!isBuiltIn || isHeadphones)
     }
     
     public func hash(into hasher: inout Hasher) {
         hasher.combine(id)
+        hasher.combine(hasInput)
+        hasher.combine(hasOutput)
+        hasher.combine(dataSourceID)
+        hasher.combine(name)
     }
     
     public static func == (lhs: AudioDevice, rhs: AudioDevice) -> Bool {
-        lhs.id == rhs.id
+        lhs.id == rhs.id &&
+        lhs.hasInput == rhs.hasInput &&
+        lhs.hasOutput == rhs.hasOutput &&
+        lhs.dataSourceID == rhs.dataSourceID &&
+        lhs.name == rhs.name
     }
 }
 
@@ -92,15 +114,16 @@ public final class AudioDeviceHelper {
     
     public static func getDevice(id: AudioDeviceID) -> AudioDevice? {
         // Name
-        var name: CFString = "" as CFString
-        var nameSize = UInt32(MemoryLayout<CFString>.size)
+        var unmanagedName: Unmanaged<CFString>?
+        var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         var nameAddress = AudioObjectPropertyAddress(
             mSelector: kAudioObjectPropertyName,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        let nameStatus = AudioObjectGetPropertyData(id, &nameAddress, 0, nil, &nameSize, &name)
-        guard nameStatus == noErr else { return nil }
+        let nameStatus = AudioObjectGetPropertyData(id, &nameAddress, 0, nil, &nameSize, &unmanagedName)
+        guard nameStatus == noErr, let cfName = unmanagedName?.takeRetainedValue() else { return nil }
+        let deviceName = cfName as String
         
         // Input streams
         var inStreamAddress = AudioObjectPropertyAddress(
@@ -142,20 +165,33 @@ public final class AudioDeviceHelper {
         )
         AudioObjectGetPropertyData(id, &transAddress, 0, nil, &transSize, &transport)
         
+        // Data Source (для различения Built-in Speakers и External Headphones на одном кодеке)
+        var dataSource: UInt32 = 0
+        var dsSize = UInt32(MemoryLayout<UInt32>.size)
+        var dsAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDataSource,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(id, &dsAddress) {
+            AudioObjectGetPropertyData(id, &dsAddress, 0, nil, &dsSize, &dataSource)
+        }
+        
         return AudioDevice(
             id: id,
-            name: name as String,
+            name: deviceName,
             hasInput: hasIn,
             hasOutput: hasOut,
             sampleRate: sampleRate,
-            transportType: transport
+            transportType: transport,
+            dataSourceID: dataSource
         )
     }
     
     /// Получить актуальный BlackHole (поиск по имени)
     public static func findBlackHoleDevice() -> AudioDevice? {
         let devices = getAllDevices()
-        return devices.first { $0.hasInput && $0.isVirtual }
+        return devices.first { $0.hasInput && $0.name.localizedCaseInsensitiveContains("BlackHole") }
     }
     
     /// Получить наиболее подходящие наушники вывода (Bluetooth / гарнитура)
@@ -438,5 +474,61 @@ public final class AudioDeviceHelper {
             if s == noErr { return muted != 0 }
         }
         return false
+    }
+    
+    // MARK: - Системное управление воспроизведением медиа (MediaRemote) during transitions
+    
+    private typealias MRMediaRemoteSendCommandFn = @convention(c) (UInt32, AnyObject?) -> Bool
+    private typealias MRMediaRemoteGetNowPlayingApplicationIsPlayingFn = @convention(c) (DispatchQueue, @escaping (Bool) -> Void) -> Void
+    
+    private static let mediaRemoteHandle: UnsafeMutableRawPointer? = {
+        dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_NOW)
+    }()
+    
+    private static var mrSendCommand: MRMediaRemoteSendCommandFn? = {
+        guard let handle = mediaRemoteHandle,
+              let sym = dlsym(handle, "MRMediaRemoteSendCommand") else { return nil }
+        return unsafeBitCast(sym, to: MRMediaRemoteSendCommandFn.self)
+    }()
+    
+    private static var mrGetIsPlaying: MRMediaRemoteGetNowPlayingApplicationIsPlayingFn? = {
+        guard let handle = mediaRemoteHandle,
+              let sym = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying") else { return nil }
+        return unsafeBitCast(sym, to: MRMediaRemoteGetNowPlayingApplicationIsPlayingFn.self)
+    }()
+    
+    /// Проверить, играет ли сейчас системный медиаплеер, и если играет — поставить на паузу на время инициализации
+    public static func pauseSystemMediaIfPlaying(completion: @escaping (Bool) -> Void) {
+        guard let getIsPlaying = mrGetIsPlaying, let sendCmd = mrSendCommand else {
+            completion(false)
+            return
+        }
+        getIsPlaying(DispatchQueue.main) { isPlaying in
+            if isPlaying {
+                // kMRPause = 1
+                _ = sendCmd(1, nil)
+                completion(true)
+            } else {
+                completion(false)
+            }
+        }
+    }
+    
+    /// Безусловно отправить команду Play системному медиаплееру (если мы ставили его на паузу или если macOS сама поставила его на паузу при отключении наушников)
+    public static func resumeSystemMedia() {
+        guard let sendCmd = mrSendCommand else { return }
+        // kMRPlay = 0
+        _ = sendCmd(0, nil)
+    }
+    
+    /// Проверить асинхронно, играет ли сейчас системный медиаплеер
+    public static func checkSystemMediaIsPlaying(completion: @escaping (Bool) -> Void) {
+        guard let getIsPlaying = mrGetIsPlaying else {
+            completion(false)
+            return
+        }
+        getIsPlaying(DispatchQueue.main) { isPlaying in
+            completion(isPlaying)
+        }
     }
 }

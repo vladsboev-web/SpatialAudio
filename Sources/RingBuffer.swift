@@ -108,10 +108,11 @@ public final class AudioRingBuffer {
         defer { os_unfair_lock_unlock(&lock) }
 
         let n = min(count, capacity)
+        let offset = count - n
         for i in 0..<n {
             let idx = (writePos + i) & mask
-            let l = left[i]
-            let r = right[i]
+            let l = left[offset + i]
+            let r = right[offset + i]
             bufL[idx] = l
             bufL[idx + capacity] = l
             bufR[idx] = r
@@ -225,7 +226,5 @@ public final class AudioRingBuffer {
         lagAvg = 0.0
         isInitialized = false
         isRefilling = false
-        bufL.initialize(repeating: 0, count: capacity * 2)
-        bufR.initialize(repeating: 0, count: capacity * 2)
     }
 }

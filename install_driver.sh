@@ -1,12 +1,15 @@
 #!/bin/bash
+set -e
 
-PKG_PATH="/tmp/BlackHole2ch.pkg"
+PKG_PATH="${TMPDIR:-/tmp}/BlackHole2ch-0.7.1.pkg"
 
 echo "🎵 Установка виртуального аудиодрайвера BlackHole 2ch..."
 
-if [ ! -f "$PKG_PATH" ]; then
+if [ ! -f "$PKG_PATH" ] || ! pkgutil --check-signature "$PKG_PATH" >/dev/null 2>&1; then
+    rm -f "$PKG_PATH"
     echo "⬇️ Скачивание BlackHole 2ch..."
-    curl -L "https://existential.audio/downloads/BlackHole2ch-0.7.1.pkg" -o "$PKG_PATH"
+    curl -fL "https://existential.audio/downloads/BlackHole2ch-0.7.1.pkg" -o "$PKG_PATH"
+    pkgutil --check-signature "$PKG_PATH" >/dev/null
 fi
 
 if [ "$EUID" -eq 0 ]; then

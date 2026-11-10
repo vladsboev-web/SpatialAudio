@@ -4,13 +4,20 @@
 
 # SpatialAudio for macOS
 
-**System-wide Apple HRTFHQ Spatial Soundstage & Speaker Virtualization for ANY Headphones on Mac**  
-*Нативное пространственное стерео (Apple HRTFHQ) для любых наушников в macOS*
+**System-wide Apple HRTFHQ Spatial Soundstage & Speaker Virtualization for ANY Headphones & Speakers on Mac**  
+*Нативное пространственное стерео (Apple HRTFHQ + XTC Speaker Mode) для любых наушников и колонок в macOS*
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013.0%2B-blue?logo=apple)](https://github.com/vladsboev-web/SpatialAudio/releases)
 [![Architecture](https://img.shields.io/badge/arch-Universal%202%20(Apple%20Silicon%20%26%20Intel)-success?logo=apple)](https://github.com/vladsboev-web/SpatialAudio/releases)
-[![DSP Engine](https://img.shields.io/badge/DSP-Apple%20HRTFHQ%20Binaural-purple)](#-key-features)
+[![Version](https://img.shields.io/badge/version-2.0-orange)](https://github.com/vladsboev-web/SpatialAudio/releases)
+[![DSP Engine](https://img.shields.io/badge/DSP-Apple%20HRTFHQ%20%2B%20M%2FS%20XTC-purple)](#-acoustic-engineering--dsp-architecture)
 [![Download](https://img.shields.io/badge/download-Latest%20Release%20(.zip)-brightgreen)](https://github.com/vladsboev-web/SpatialAudio/releases/latest)
+
+<br/>
+
+<img src="Resources/screenshot_v2.png" alt="SpatialAudio v2 Liquid Glass Interface" width="344" />
+
+<br/>
 
 [**🇺🇸 English**](#-english) · [**🇷🇺 Русский**](#-русский) · [**📦 Download / Скачать**](https://github.com/vladsboev-web/SpatialAudio/releases/latest)
 
@@ -22,129 +29,118 @@
 
 ### Why SpatialAudio?
 
-By default, macOS restricts Apple's Spatial Audio to AirPods/Beats, while standard stereo in headphones suffers from extreme left/right channel separation (*"in-head localization"*), causing listening fatigue during long music, movie, or work sessions.
+By default, macOS restricts Apple's Spatial Audio to AirPods and Beats hardware, while standard stereo in headphones creates an unnatural sensation where sound is trapped directly inside your head (*"in-head localization"*). Long listening sessions cause severe lateral ear fatigue.
 
-**SpatialAudio** is a lightweight, native Swift Menu Bar utility (<1% CPU, 0 Electron bloat) that unlocks Apple's official **`HRTFHQ` (High-Quality Head-Related Transfer Function)** 3D audio engine for **any** pair of headphones — whether you use Sony, Bose, Sennheiser, Beyerdynamic, wired IEMs, USB DACs, or AirPods on an Intel or Apple Silicon Mac.
+When listening through laptop speakers or closely spaced desktop monitors, the opposite problem occurs: the narrow physical stereo base causes cross-talk between ears, collapsing soundstage depth and smearing instrumental separation.
 
-It places two virtual studio monitors in front of you in 3D space, moving the soundstage **out of your head** with natural interaural time and level cues (ITD/ILD) and subtle room acoustics.
+**SpatialAudio v2.0** is a native, ultra-lightweight Swift Menu Bar utility (<1% CPU, zero Electron bloat) that unlocks Apple's official **`HRTFHQ` (High-Quality Head-Related Transfer Function)** 3D audio engine for **any** headphones — Sony, Bose, Sennheiser, Beyerdynamic, wired IEMs, USB DACs, or AirPods — and introduces an acoustic **Stereo Speaker XTC Mode** that expands the stereo field beyond physical speaker boundaries.
 
-### ✨ Key Features
+---
 
-- **🎧 True Apple `HRTFHQ` Binaural Engine**: Uses CoreAudio's native high-quality spatial mixer (`kAudioUnitSubType_SpatialMixer` / `.HRTFHQ`) with $+4.0\text{ dB}$ binaural attenuation compensation.
-- **🔊 Out-of-Head Studio Soundstage**: Adjustable speaker angle ($\pm 15^\circ \dots \pm 60^\circ$) and ultra-delicate room acoustics ($0.0\% \dots 3.0\%$ in $0.1\%$ steps) that eliminate headphone listening fatigue without coloring the tone.
-- **🎚 Single Attenuation (Unity Gain 1:1) Volume Control**: Native macOS volume keys (`F10` / `F11` / `F12`) work seamlessly with a natural logarithmic curve — no double attenuation ($V^2$) and no Bluetooth AVRCP volume ceiling bugs.
-- **⚡ Ultra-Low Latency & Drift-Free Audio**: Custom lock-free `AudioRingBuffer` with continuous sub-sample linear interpolation and $\pm 0.8\%$ clock-drift tracking ensures zero crackles and tight lip-sync for movies, YouTube, and gaming.
-- **🔄 Smart Hot-Plug & Auto-Pause**:
-  - Automatically switches to your headphones as soon as you connect them and seamlessly falls back to Mac speakers when you put them in the case.
-  - Selecting another output device in macOS Control Center automatically pauses the DSP pipeline (`0% CPU`).
-- **💾 Custom Profiles (CRUD)**: Create, rename, and switch between custom soundstage presets (Music, Movies, Podcasts, Gaming) saved persistently.
-- **🚀 Native Universal 2 Binary**: Compiled natively for **Apple Silicon (`arm64`: M1/M2/M3/M4)** and **Intel (`x86_64`)** on macOS 13 Ventura, 14 Sonoma, and 15 Sequoia+.
+### 🔬 Acoustic Engineering & DSP Architecture
 
-### 📊 How It Compares
+Binaural 3D rendering and speaker virtualization involve complex psychoacoustics. SpatialAudio v2 solves the three fundamental acoustic challenges of spatial audio:
 
-| Feature | Standard Stereo | Paid Audio Enhancers | **SpatialAudio** |
-| :--- | :---: | :---: | :---: |
-| **Soundstage** | Inside your head (L/R ear) | Artificial EQ / heavy reverb | **Natural front studio monitors (Apple HRTFHQ)** |
-| **Works with ANY headphones** | ✅ | ✅ | **✅ (Bluetooth, Wired, USB DAC)** |
-| **Native Apple Silicon & Intel** | ✅ | Often requires kexts/Rosetta | **✅ Pure Swift & CoreAudio (Universal 2)** |
-| **CPU & RAM footprint** | 0% | High (background daemons) | **< 1% CPU, ~25 MB RAM (0% when paused)** |
-| **Price & Privacy** | Free | $20–$60 / Telemetry | **100% Free & Open Source** |
+#### 1. 7-Band Diffuse-Field Equalization (`StereoFeed`)
+Apple's native `kAudioUnitSubType_SpatialMixer` HRTF model is based on an acoustic dummy head that introduces fixed mechanical resonances:
+* Main ear canal resonance: $+1.42\text{ dB}$ around $2.26\text{ kHz}$.
+* Concha / pinna cavity resonance: $+4.35\text{ dB}$ peak at $7.31\text{ kHz}$ (causing harsh sibilance and treble fatigue).
+* Dummy head high-frequency resonance: $+5.60\text{ dB}$ at $12.6\text{ kHz}$ and $+1.75\text{ dB}$ at $12.75\text{ kHz}$ (total $-7.43\text{ dB}$ dip needed).
 
-### 📦 Installation (1-Line via Homebrew or Manual)
+SpatialAudio v2 implements a precision **7-band Diffuse-Field EQ** in Double-precision floating point (`Direct Form II Transposed` biquads). It eliminates the dummy head's static frequency coloration while strictly preserving the directional **Blauert band** ($3.5 - 4.5\text{ kHz}$) and personal anatomical pinna notches.
 
-#### Option A: 1-Command Install via Homebrew (Recommended)
-Automatically installs `BlackHole 2ch`, places `SpatialAudio.app` in `/Applications`, and clears macOS Gatekeeper quarantine:
+| Band | Filter Type | Frequency $f_c$ | $Q$ | Gain | Acoustic Purpose |
+| :---: | :---: | :---: | :---: | :---: | :--- |
+| **Band 1** | Peaking EQ | $1\,230\text{ Hz}$ | $0.77$ | $-0.43\text{ dB}$ | Smooth transition into midrange plateau |
+| **Band 2** | Peaking EQ | $2\,260\text{ Hz}$ | $1.70$ | $-1.42\text{ dB}$ | Ear canal resonance compensation |
+| **Band 3** | Peaking EQ | $3\,530\text{ Hz}$ | $4.50$ | $-0.97\text{ dB}$ | Step smoothing while protecting Blauert band ($4-4.5\text{ kHz}$) |
+| **Band 4** | Peaking EQ | $7\,310\text{ Hz}$ | $2.98$ | $-4.35\text{ dB}$ | Complete elimination of concha resonance & sibilants |
+| **Band 5** | Peaking EQ | $10\,340\text{ Hz}$ | $4.50$ | $+0.65\text{ dB}$ | Slope decoupling between $7.3\text{ kHz}$ and $12.6\text{ kHz}$ |
+| **Band 6** | Peaking EQ | $12\,600\text{ Hz}$ | $2.07$ | $-5.60\text{ dB}$ | Treble dummy head resonance removal |
+| **Band 7** | Peaking EQ | $12\,750\text{ Hz}$ | $3.00$ | $-1.75\text{ dB}$ | Target dip matching spherical average ($-7.43\text{ dB}$ total) |
+
+#### 2. Adaptive Mid-Channel Center Restoration (Phantom Center Dip)
+When virtual stereo monitors are placed in front of you ($\pm 15^\circ \dots \pm 60^\circ$), identical Left and Right signals ($M = (L+R)/2$) arrive at both ears with an Interaural Time Difference ($\text{ITD} \approx 250-300\mu\text{s}$). This produces destructive comb filtering with deep notches ($-6 \dots -11\text{ dB}$) in the central vocal range ($1.2 - 3.2\text{ kHz}$).
+
+SpatialAudio v2 dynamically isolates the Mid channel and applies an **Adaptive Bell Filter** with cosine-spline interpolation across angles $15^\circ \to 60^\circ$ ($3\,050\text{ Hz} \to 610\text{ Hz}$, $Q = 1.10 \to 0.68$, Gain $+3.2 \dots +3.8\text{ dB}$). Dialogue, movie speech, and lead vocals stay centered, solid, and intelligible without hollow phase cancellation.
+
+#### 3. Low-Frequency Reverb Compensation (`.smallRoom`)
+CoreAudio's `.smallRoom` reverb model introduces acoustic phase cancellation at $46\text{ Hz}$ ($-2\text{ dB}$ sub-bass loss) and a boxy resonance at $82\text{ Hz}$ and $235\text{ Hz}$. SpatialAudio v2 applies dynamic real-time compensation:
+* $46\text{ Hz}$ Peaking: $+2.45\text{ dB} \times (1 - e^{-\text{pct}/0.55})$ (restores deep sub-bass impact).
+* $82\text{ Hz}$ Peaking: $-0.28\text{ dB} \times \text{pct}$ (eliminates boomy boxiness).
+* $235\text{ Hz}$ Peaking: $-0.45\text{ dB} \times \text{pct}^{0.72}$ (clears lower-mid muddiness).
+
+#### 4. Stereo Speakers XTC Mode (Blumlein/Bauer Shuffler)
+When listening on physical MacBook or external desktop speakers, HRTF binaural processing is bypassed to prevent double ear-filtering. Instead, the signal is routed through a Blumlein/Bauer M/S shuffler:
+* Side channel ($S = (L-R)/2$) High-Shelf filter above $250\text{ Hz}$ ($Q = 0.707$) with gain up to $+3.5\text{ dB}$ calculated dynamically from physical speaker angle $\theta_{\text{phys}} \in [\pm 10.0^\circ \dots \pm 35.0^\circ]$:
+  $$G_{\text{Side}} = 20\log_{10}\left(\frac{\sin 30^\circ}{\sin \theta_{\text{phys}}}\right) \in [0.0 \dots +3.5\text{ dB}]$$
+* Bass below $200\text{ Hz}$ and mono signals ($L+R = 2M$) remain strictly $1:1$ bit-exact.
+* Early room reflections are fed $100\%$ wet with equal-power scaling ($\text{sendScale} = 0.65\sqrt{\text{reverbBlend}}$).
+
+#### 5. BS.1770 LUFS Equal Loudness Gain Staging
+Bypass and Spatial modes are calibrated to identical ITU-R BS.1770 integrated loudness ($0\text{ LU}$ difference, $preGain = -0.5\text{ dB}$). The Apple Peak Limiter acts purely as a transparent safety margin, guaranteeing zero dynamic compression or pumping.
+
+#### 6. Sub-Sample RingBuffer & Single Attenuation Volume
+* **Clock Drift Tracking**: A lock-free ring buffer with continuous linear interpolation and $\pm 0.8\%$ clock drift auto-tracking eliminates buffer underruns between the Mac host and Bluetooth DACs.
+* **Single Attenuation (1:1 Unity Gain)**: Volume keys (`F10`/`F11`/`F12`) adjust the audio stream once inside BlackHole. This preserves the native logarithmic curve, prevents double attenuation ($V^2$), and eliminates Bluetooth AVRCP volume ceiling bugs.
+
+---
+
+### ✨ Key Features in v2.0
+
+- **🎧 Two Dedicated Audio Modes**:
+  - **Headphones Mode (`HRTFHQ`)**: Apple binaural mixer with calibrated 7-band Diffuse-Field EQ and Adaptive Mid-EQ.
+  - **Speakers Mode (XTC M/S Shuffler)**: Physical speaker angle adjustment ($\pm 10.0^\circ \dots \pm 35.0^\circ$) widening the soundstage beyond the laptop screen.
+- **🎨 Liquid Glass UI**:
+  - Borderless `FloatingControlPanel` (`NSPanel`) with 120 Hz CoreAnimation slide & fade transitions from the Menu Bar.
+  - Custom vector icons for Headphones, Speakers, and Theme toggle.
+  - Persistent **Light / Dark Theme** switcher (initializes from macOS system appearance on first launch) and instant **RU / EN** language switching.
+  - Real-time audio-reactive radial gradient waves rising strictly beneath UI cards in sync with L/R level meters ($0\%$ CPU when closed).
+- **💾 Independent Profile Management (CRUD)**: Separate profile lists for Headphones and Speakers modes with automatic "Default" profile creation.
+- **🔄 Smart Hot-Plug & Media Control**:
+  - Connect/disconnect headphones without losing `BlackHole 2ch` as macOS default output.
+  - Two-phase Bluetooth stream discovery prevents coreaudiod crashes.
+  - System media auto-pauses during device transitions and auto-resumes once playback is ready.
+
+---
+
+### 📦 Installation
+
+#### Option A: 1-Command via Homebrew (Recommended)
 ```bash
 brew install --cask vladsboev-web/tap/spatialaudio
 ```
 
 #### Option B: Manual Installation
-##### Step 1: Install BlackHole 2ch (Virtual Audio Loopback Driver)
-SpatialAudio uses the open-source [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) driver to capture system audio losslessly:
-```bash
-brew install blackhole-2ch
-```
-*(Or download the `.pkg` installer directly from [Existential Audio](https://existential.audio/blackhole/), or click the 1-click install button inside the app).*
-
-#### Step 2: Download SpatialAudio
-1. Download **`SpatialAudio.zip`** from the **[Latest Release](https://github.com/vladsboev-web/SpatialAudio/releases/latest)**.
-2. Unzip and drag **`SpatialAudio.app`** to your `/Applications` folder.
-3. **Bypass macOS Gatekeeper on first launch** (since the app is free and not notarized with a paid $99/yr Apple Developer ID):
-   ```bash
-   xattr -cr /Applications/SpatialAudio.app
-   open /Applications/SpatialAudio.app
-   ```
-   *(Alternatively, Right-Click `SpatialAudio.app` in Finder → click **Open**).*
-4. Grant **Microphone permission** when prompted (required by macOS CoreAudio to read the audio stream from `BlackHole 2ch`).
-
----
-
-## 🇷🇺 Русский
-
-**Нативное пространственное стерео (Apple HRTFHQ) для любых Bluetooth и проводных наушников в macOS (Fixed Spatial Audio).**
-
-Приложение работает в строке меню (Menu Bar) macOS, перехватывает стереозвук системы через виртуальный аудиодрайвер `BlackHole 2ch`, обрабатывает его с использованием оригинального бинаурального алгоритма Apple `HRTFHQ` и выводит в ваши наушники или динамики с минимальной задержкой и идеальной синхронизацией видео и звука.
-
----
-
-### 🌟 Ключевые возможности
-
-* **Apple HRTFHQ Engine**: Аппаратный бинауральный рендеринг Apple CoreAudio с компенсацией бинаурального затухания ($+4.0\text{ dB}$) — эффект сцены AirPods для любых наушников.
-* **Фиксированная звуковая сцена**: Звук естественно выносится из головы вперед перед вами, как при прослушивании настоящих студийных мониторов.
-* **Архитектура Single Attenuation (Unity Gain 1:1)**: Плавная и естественная регулировка громкости системными клавишами `F10` / `F11` / `F12` без эффекта двойного затухания ($V^2$) и без потолка громкости Bluetooth AVRCP.
-* **Субдискретный RingBuffer**: Линейная интерполяция и автокомпенсация дрейфа тактовых генераторов ($\pm 0.8\%$) — кристально чистый звук без треска и щелчков.
-* **Умное горячее переключение (Hot-Plug)**:
-  - При подключении наушников звук автоматически и без скачков громкости переводится в наушники.
-  - При отключении наушников (например, убрали AirPods в кейс) воспроизведение бесшовно продолжается через встроенные динамики Mac.
-  - При ручном выборе другого устройства в Центре управления macOS приложение само переходит в режим паузы (`0% CPU`).
-* **CRUD Профилей и тонкая акустика**: Собственные пресеты с деликатной настройкой акустики комнаты (`0.0%–3.0%` с шагом `0.1%`), сохраняемые при перезапуске.
-* **Защита в полноэкранном режиме и правый клик**: Окно не обрезается при автоскрытии меню-бара, а по правому клику доступно нативное меню быстрого управления.
-
----
-
-### 💻 Совместимость и системные требования
-
-| Параметр | Поддержка / Описание |
-| :--- | :--- |
-| **Архитектура процессора** | **Universal 2 Binary**: Полная нативная поддержка **Apple Silicon** (`arm64`: M1, M2, M3, M4 и новее) и **Intel** (`x86_64`) |
-| **Операционная система** | **macOS 13.0 (Ventura)**, **macOS 14 (Sonoma)**, **macOS 15 (Sequoia)** и новее |
-| **Аудиодрайвер** | [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) (v0.6.0+) |
-| **Наушники и вывод** | Любые Bluetooth-наушники (AirPods, Sony, Bose, Sennheiser, Ugreen, Anker и др.), проводные наушники, внешние ЦАП или динамики Mac |
-
----
-
-### 📦 Установка
-
-#### Вариант 1: Установка в 1 команду через Homebrew (Рекомендуется)
-Автоматически установит драйвер `BlackHole 2ch`, скопирует `SpatialAudio.app` в `/Applications` и снимет карантин macOS Gatekeeper:
-```bash
-brew install --cask vladsboev-web/tap/spatialaudio
-```
-
-#### Вариант 2: Ручная установка (Готовый релиз)
-
-1. **Установите виртуальный аудиодрайвер BlackHole 2ch** (требуется для перехвата системного звука):
+1. **Install BlackHole 2ch** (Virtual loopback driver):
    ```bash
    brew install blackhole-2ch
    ```
-   *Либо скачайте официальный инсталлятор `.pkg` с [сайта Existential Audio](https://existential.audio/blackhole/) (или нажмите кнопку «Установить BlackHole в 1 клик» прямо в окне программы).*
-
-2. **Скачайте приложение**:
-   - Перейдите в раздел **[Releases](https://github.com/vladsboev-web/SpatialAudio/releases/latest)** и скачайте архив `SpatialAudio.zip`.
-   - Распакуйте архив и перетащите `SpatialAudio.app` в папку `/Applications` («Программы»).
-
-3. **Первый запуск (Обход macOS Gatekeeper)**:
-   Так как приложение бесплатное и распространяется с открытым исходным кодом без платной подписки Apple Developer ID ($99/год), снимите карантин командой в Терминале:
+2. **Download SpatialAudio**:
+   - Download `SpatialAudio.zip` from [Releases](https://github.com/vladsboev-web/SpatialAudio/releases/latest).
+   - Unzip and drag `SpatialAudio.app` to `/Applications`.
+3. **Bypass macOS Gatekeeper on first launch**:
    ```bash
    xattr -cr /Applications/SpatialAudio.app
    open /Applications/SpatialAudio.app
    ```
-   *(Либо нажмите по `SpatialAudio.app` **правой кнопкой мыши** в папке «Программы» → выберите **«Открыть»**).*
+4. **Grant Microphone Permission** when prompted (required by CoreAudio to capture BlackHole loopback).
 
-4. **Доступ к микрофону**:
-   При первом запуске разрешите доступ к микрофону — это необходимо macOS для чтения цифрового аудиопотока из виртуального драйвера `BlackHole 2ch`.
+---
 
-#### Вариант 3: Сборка из исходников (Для разработчиков)
+### 🎛 Quick Start & Everyday Usage
+
+You rarely need to open the app window during everyday listening:
+1. **To listen with Spatial Soundstage**:
+   - In macOS Control Center or Sound Menu Bar, select **`BlackHole 2ch`** as output. The Menu Bar icon turns solid (`person.wave.2.fill`).
+2. **To bypass Spatial Audio**:
+   - Select your regular speakers or headphones directly in macOS Sound menu. SpatialAudio automatically pauses ($0\%$ CPU).
+3. **Right-Click the Menu Bar Icon**:
+   - Instant Start / Stop toggle and Quit (`⌘Q`).
+
+---
+
+### 🛠 Building from Sources (Universal 2 Binary)
 
 ```bash
 git clone https://github.com/vladsboev-web/SpatialAudio.git
@@ -152,4 +148,166 @@ cd SpatialAudio
 ./install_driver.sh
 ./build_app.sh
 ```
-Скрипт соберет Universal 2 бинарник (`arm64` + `x86_64`), упакует `SpatialAudio.zip` и установит подписанное приложение в `/Applications/SpatialAudio.app`.
+`build_app.sh` automatically compiles native binaries for both **Apple Silicon (`arm64`)** and **Intel (`x86_64`)**, links them into a **Universal 2 fat binary** with `lipo`, signs the app, packages `SpatialAudio.zip`, and installs it into `/Applications/SpatialAudio.app`.
+
+---
+
+### 🗂 Project Architecture (`Sources/`)
+
+* [`Sources/SpatialEngine.swift`](Sources/SpatialEngine.swift) — Low-level CoreAudio DSP engine (`AVAudioEngine` + `kAudioUnitSubType_SpatialMixer`), 7-band Diffuse-Field EQ, Adaptive Mid-EQ, Reverb-EQ, and Speakers M/S Shuffler.
+* [`Sources/SpatialControlView.swift`](Sources/SpatialControlView.swift) — SwiftUI Liquid Glass interface: interactive soundstage radar, vector icons, custom dropdown menus, and audio-reactive gradient waves.
+* [`Sources/AudioCoordinator.swift`](Sources/AudioCoordinator.swift) — High-level audio lifecycle manager: hardware listeners, two-phase Bluetooth discovery, hot-plug routing, and profile synchronization.
+* [`Sources/AudioDeviceHelper.swift`](Sources/AudioDeviceHelper.swift) — CoreAudio HAL wrapper for device discovery, volume control, data source tracking, and `MediaRemote` media control.
+* [`Sources/RingBuffer.swift`](Sources/RingBuffer.swift) — Lock-free sub-sample circular ring buffer with continuous linear interpolation and $\pm 0.8\%$ clock-drift tracking.
+* [`Sources/AudioCaptureUnit.swift`](Sources/AudioCaptureUnit.swift) — Zero-copy HAL AUHAL audio input capture from `BlackHole 2ch`.
+* [`Sources/MenuBarController.swift`](Sources/MenuBarController.swift) — Menu Bar status item controller and borderless `FloatingControlPanel` (`NSPanel`) with 120 Hz GPU slide animation.
+* [`Sources/ProfileManager.swift`](Sources/ProfileManager.swift) — Persistent JSON profile storage for Headphones and Speakers modes in `UserDefaults`.
+* [`Sources/LocalizationManager.swift`](Sources/LocalizationManager.swift) — Dynamic RU / EN localization manager and `ThemeManager` with system theme detection.
+* [`Sources/main.swift`](Sources/main.swift) — Application lifecycle entry point.
+
+---
+
+## 🇷🇺 Русский
+
+### Зачем нужен SpatialAudio?
+
+По умолчанию Apple ограничивает пространственный звук наушниками AirPods и Beats. Обычные проводные или Bluetooth-наушники воспроизводят стандартное стерео с неестественной изоляцией каналов (*«звук внутри головы»*), вызывая быстрое утомление слуха при прослушивании музыки или просмотре фильмов.
+
+На динамиках ноутбука или настольных колонках возникает обратная проблема: узкая стереобаза и перекрёстные помехи между ушами схлопывают глубину сцены, делая панораму плоской.
+
+**SpatialAudio v2.0** — это легковесная нативная утилита для macOS (<1% CPU, без Electron), которая открывает оригинальный бинауральный 3D-движок Apple **`HRTFHQ` (Head-Related Transfer Function High Quality)** для **любых наушников** (Sony, Bose, Sennheiser, Beyerdynamic, AirPods, ЦАП) и добавляет специальный **Режим колонок (Speakers XTC)** для акустического расширения стереопанорамы.
+
+---
+
+### 🔬 Психоакустика и калибровка звука в v2.0
+
+Бинауральный рендеринг требует точной математической компенсации. SpatialAudio v2 решает три ключевые физические проблемы пространственного аудио:
+
+#### 1. 7-полосный Diffuse-Field EQ (Устранение окраса манекена Apple)
+В ядре CoreAudio бинауральный алгоритм Apple HRTFHQ построен на замерах физического манекена, который вносит паразитные резонансы:
+* Резонанс слухового канала: $+1.42\text{ dB}$ на $2.26\text{ кГц}$.
+* Резонанс ушной раковины (concha): $+4.35\text{ dB}$ на $7.31\text{ кГц}$ (вызывает резкость и «песок» на сибилянтах).
+* ВЧ-пик имитатора уха: $+5.60\text{ dB}$ на $12.6\text{ кГц}$ и $+1.75\text{ dB}$ на $12.75\text{ кГц}$ (требует суммарного среза $-7.43\text{ dB}$).
+
+В SpatialAudio v2 встроен **7-полосный каскад параметрических биквад-фильтров** высокой точности (`Double`), устраняющий стационарные пики манекена без затрагивания слуховой **полосы Блауэрта** ($3.5 - 4.5\text{ кГц}$) и индивидуальных вырезов ушной раковины.
+
+| Полоса | Тип фильтра | Частота $f_c$ | $Q$ | Усиление | Назначение |
+| :---: | :---: | :---: | :---: | :---: | :--- |
+| **Band 1** | Peaking EQ | $1\,230\text{ Гц}$ | $0.77$ | $-0.43\text{ dB}$ | Плавный вход в среднечастотный диапазон |
+| **Band 2** | Peaking EQ | $2\,260\text{ Гц}$ | $1.70$ | $-1.42\text{ dB}$ | Компенсация главной моды слухового канала |
+| **Band 3** | Peaking EQ | $3\,530\text{ Гц}$ | $4.50$ | $-0.97\text{ dB}$ | Сглаживание ступеньки с сохранением полосы Блауэрта ($4-4.5\text{ кГц}$) |
+| **Band 4** | Peaking EQ | $7\,310\text{ Гц}$ | $2.98$ | $-4.35\text{ dB}$ | Устранение резонанса чаши уха и сибилянтов |
+| **Band 5** | Peaking EQ | $10\,340\text{ Гц}$ | $4.50$ | $+0.65\text{ dB}$ | Развязка склонов между $7.3$ и $12.6\text{ кГц}$ |
+| **Band 6** | Peaking EQ | $12\,600\text{ Гц}$ | $2.07$ | $-5.60\text{ dB}$ | Снятие ВЧ-резонанса манекена |
+| **Band 7** | Peaking EQ | $12\,750\text{ Гц}$ | $3.00$ | $-1.75\text{ dB}$ | Суммарный целевой срез до $-7.43\text{ dB}$ |
+
+#### 2. Адаптивный Mid-EQ центра (Устранение провала голоса и диалогов)
+При расстановке виртуальных мониторов под углом $\pm 15^\circ \dots \pm 60^\circ$ идентичный центральный моно-сигнал ($M = (L+R)/2$) доходит до обоих ушей с межушной задержкой ($\text{ITD} \approx 250-300\mu\text{с}$). Возникает гребенчатая интерференция: провал на $-6 \dots -11\text{ dB}$ в зоне $1.2 - 3.2\text{ кГц}$, из-за чего голос отдаляется и звучит пусто.
+
+SpatialAudio v2 выделяет канал $M$ и применяет **адаптивный колокольный фильтр** с плавной косинусной сплайн-интерполяцией по углу ($3\,050\text{ Гц} \to 610\text{ Гц}$, $Q = 1.10 \to 0.68$, подъем $+3.2 \dots +3.8\text{ dB}$). Вокал и речь остаются плотными, разборчивыми и сфокусированными по центру.
+
+#### 3. Reverb-EQ (Компенсация суб-баса 46 Гц в пространственной комнате)
+Заводской пресет Apple `.smallRoom` при наложении отражений вызывает интерференционный спад на $46\text{ Гц}$ ($-2\text{ dB}$ суб-баса) и комнатный гул на $82\text{ Гц}$ и $235\text{ Гц}$. SpatialAudio v2 динамически компенсирует этот эффект пропорционально ползунку акустики комнаты:
+* $46\text{ Гц}$ Peaking: $+2.45\text{ dB} \times (1 - e^{-\text{pct}/0.55})$ (возвращает плотный глубокий суб-бас).
+* $82\text{ Гц}$ Peaking: $-0.28\text{ dB} \times \text{pct}$ (убирает коробочный резонанс).
+* $235\text{ Гц}$ Peaking: $-0.45\text{ dB} \times \text{pct}^{0.72}$ (очищает нижнюю середину от мути).
+
+#### 4. Режим колонок (Stereo Speakers XTC / Blumlein-Bauer Shuffler)
+При выводе на встроенные динамики Mac или настольные стереоколонки бинауральная обработка HRTF отключается, чтобы не накладывать фильтры ушных раковин на физические динамики. Вместо этого сигнал обрабатывается через M/S-расширитель Бауэра:
+* В канале $S = (L-R)/2$ работает фильтр High-Shelf выше $250\text{ Гц}$ ($Q = 0.707$) с подъемом до $+3.5\text{ dB}$, рассчитываемым по физическому полууглу колонок $\theta_{\text{phys}} \in [\pm 10.0^\circ \dots \pm 35.0^\circ]$:
+  $$G_{\text{Side}} = 20\log_{10}\left(\frac{\sin 30^\circ}{\sin \theta_{\text{phys}}}\right) \in [0.0 \dots +3.5\text{ dB}]$$
+* Бас ниже $200\text{ Гц}$ и моно-составляющая ($L+R = 2M$) остаются абсолютно неизменными ($1:1$).
+* Ранние отражения комнаты подаются со $100\%$ wet по закону равной мощности ($\text{sendScale} = 0.65\sqrt{\text{reverbBlend}}$).
+
+#### 5. Выравнивание громкости по LUFS (ITU-R BS.1770)
+Уровень громкости режимов Bypass и Spatial выровнен до единого воспринимаемого значения ($0\text{ LU}$, $preGain = -0.5\text{ dB}$). Вы слышите реальное пространственное расширение сцены, а не психоакустический эффект «то, что громче, звучит лучше».
+
+#### 6. Субдискретный буфер и Single Attenuation
+* **Компенсация дрейфа часов**: безблокировочный кольцевой буфер с непрерывной субдискретной линейной интерполяцией и автоподстройкой скорости $\pm 0.8\%$ исключает щелчки и рассинхронизацию с Bluetooth-наушниками.
+* **Single Attenuation (1:1 Unity Gain)**: системные клавиши `F10`/`F11`/`F12` регулируют громкость один раз внутри BlackHole без квадратичного затухания ($V^2$) и без ограничений Bluetooth AVRCP.
+
+---
+
+### ✨ Главные возможности версии 2.0
+
+- **🎧 Два режима вывода**:
+  - **Наушники (`HRTFHQ`)**: бинауральный 3D-звук с калиброванным 7-полосным Diffuse-Field EQ и адаптивным Mid-EQ.
+  - **Колонки (`Speakers XTC`)**: настройка физического угла акустики ($\pm 10.0^\circ \dots \pm 35.0^\circ$) с расширением сцены за пределы экрана.
+- **🎨 Дизайн Liquid Glass**:
+  - Безрамочная панель `FloatingControlPanel` (`NSPanel`) с аппаратной 120 Гц анимацией открытия из строки меню.
+  - Авторские минималистичные векторные иконки (Наушники, Колонки, Тема).
+  - Поддержка **Светлой и Тёмной темы** (автоопределение системной темы при первом старте) и мгновенный выбор языка **RU / EN**.
+  - Фоновые градиентные аудио-волны из нижних углов под карточками ($0\%$ CPU при закрытом окне).
+- **💾 Раздельные профили для каждого режима (CRUD)**: независимые списки пресетов для Наушников и Колонок с авто-созданием профиля «Стандартный».
+- **🔄 Умный Hot-Plug и контроль медиа**:
+  - Автопереключение на подключенные наушники и возврат на динамики Mac с сохранением `BlackHole 2ch` в системе.
+  - Двухфазная инициализация Bluetooth CoreAudio (защита от вылетов при регистрации аудиопотоков).
+  - Автоматическая пауза системного медиаплеера при смене устройств и авто-возобновление после старта пайплайна.
+
+---
+
+### 📦 Установка
+
+#### Вариант 1: В 1 команду через Homebrew (Рекомендуется)
+```bash
+brew install --cask vladsboev-web/tap/spatialaudio
+```
+
+#### Вариант 2: Ручная установка
+1. **Установите аудиодрайвер BlackHole 2ch**:
+   ```bash
+   brew install blackhole-2ch
+   ```
+2. **Скачайте SpatialAudio**:
+   - Скачайте `SpatialAudio.zip` из раздела [Releases](https://github.com/vladsboev-web/SpatialAudio/releases/latest).
+   - Распакуйте и перетащите `SpatialAudio.app` в папку «Программы» (`/Applications`).
+3. **Снимите карантин macOS Gatekeeper**:
+   ```bash
+   xattr -cr /Applications/SpatialAudio.app
+   open /Applications/SpatialAudio.app
+   ```
+4. **Разрешите доступ к микрофону** при первом запуске (необходимо для чтения аудиопотока из BlackHole).
+
+---
+
+### 🎛 Руководство пользователя и сценарии
+
+1. **Включение пространственного звука**:
+   - В Пункте управления macOS или в меню Звука выберите выход **`BlackHole 2ch`**. Иконка в статус-баре станет залитой (`person.wave.2.fill`).
+2. **Обычный стереозвук напрямую**:
+   - Выберите динамики или наушники напрямую в меню macOS. SpatialAudio автоматически встанет на паузу ($0\%$ CPU).
+3. **Правый клик по иконке в строке меню**:
+   - Быстрый запуск/остановка без открытия окна и выход (`⌘Q`).
+
+---
+
+### 🛠 Сборка из исходников (Universal 2 бинарник)
+
+```bash
+git clone https://github.com/vladsboev-web/SpatialAudio.git
+cd SpatialAudio
+./install_driver.sh
+./build_app.sh
+```
+Скрипт `build_app.sh` собирает нативный код для **Apple Silicon (`arm64`)** и **Intel (`x86_64`)**, объединяет их через `lipo` в **Universal 2 fat binary**, накладывает цифровую подпись, упаковывает релизный архив `SpatialAudio.zip` и устанавливает приложение в `/Applications/SpatialAudio.app`.
+
+---
+
+### 🗂 Архитектура исходного кода (`Sources/`)
+
+* [`Sources/SpatialEngine.swift`](Sources/SpatialEngine.swift) — DSP-движок пространственной обработки CoreAudio (`AVAudioEngine` + `kAudioUnitSubType_SpatialMixer`), 7-полосный Diffuse-Field EQ, адаптивный Mid-EQ, Reverb-EQ и M/S-расширитель Бауэра для колонок.
+* [`Sources/SpatialControlView.swift`](Sources/SpatialControlView.swift) — Графический интерфейс SwiftUI в стиле Liquid Glass: радар сцены, кастомные селекторы, векторные иконки и живые градиентные волны.
+* [`Sources/AudioCoordinator.swift`](Sources/AudioCoordinator.swift) — Главный координатор аудиопотоков: слушатели CoreAudio HAL, двухфазная инициализация Bluetooth, сценарии горячего переключения и синхронизация профилей.
+* [`Sources/AudioDeviceHelper.swift`](Sources/AudioDeviceHelper.swift) — C-API обёртка CoreAudio HAL: сканирование устройств, аппаратная громкость, распознавание data source и управление плеером через `MediaRemote`.
+* [`Sources/RingBuffer.swift`](Sources/RingBuffer.swift) — Потокобезопасный кольцевой буфер с субдискретной интерполяцией и компенсацией дрейфа тактовых генераторов ($\pm 0.8\%$).
+* [`Sources/AudioCaptureUnit.swift`](Sources/AudioCaptureUnit.swift) — Захват цифрового звука из `BlackHole 2ch` через низкоуровневый AUHAL без лишних аллокаций памяти.
+* [`Sources/MenuBarController.swift`](Sources/MenuBarController.swift) — Элемент менюбара macOS и плавающая панель `FloatingControlPanel` (`NSPanel`) со 120 Гц аппаратной анимацией.
+* [`Sources/ProfileManager.swift`](Sources/ProfileManager.swift) — Хранилище профилей настроек звуковой сцены для Наушников и Колонок в `UserDefaults`.
+* [`Sources/LocalizationManager.swift`](Sources/LocalizationManager.swift) — Менеджер реактивной локализации (`RU`/`EN`) и сохранение светлой/тёмной темы (`ThemeManager`).
+* [`Sources/main.swift`](Sources/main.swift) — Точка входа в приложение и перехват системного завершения.
+
+---
+
+### 📄 Лицензия
+
+Распространяется под свободной лицензией [MIT License](LICENSE).

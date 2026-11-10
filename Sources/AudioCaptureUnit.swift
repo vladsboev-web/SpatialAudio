@@ -14,6 +14,22 @@ public final class AudioCaptureUnit {
     public private(set) var peakLevelR: Float = 0.0
     private var currentDeviceID: AudioDeviceID?
     
+    /// Считывает текущий пик левого канала и плавно гасит накопленное значение (чтобы при остановке потока пик не зависал)
+    public func consumePeakL() -> Float {
+        let val = peakLevelL
+        peakLevelL *= 0.82
+        if peakLevelL < 0.0001 { peakLevelL = 0.0 }
+        return val
+    }
+    
+    /// Считывает текущий пик правого канала и плавно гасит накопленное значение
+    public func consumePeakR() -> Float {
+        let val = peakLevelR
+        peakLevelR *= 0.82
+        if peakLevelR < 0.0001 { peakLevelR = 0.0 }
+        return val
+    }
+    
     // Предвыделенные статические буферы для исключения malloc в аудиопотоке
     private static let maxFrames = 4096
     private var leftScratch = [Float](repeating: 0, count: maxFrames)

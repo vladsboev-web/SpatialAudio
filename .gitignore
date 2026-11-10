@@ -33,5 +33,7 @@ git.md
 # Internal Agent & Development Documentation (Local Only)
 GEMINI.md
 Documentation/
+Research/
+v2/
 *.html
 *_files/

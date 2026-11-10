@@ -1,17 +1,35 @@
 import AppKit
 import SwiftUI
 import Combine
+import QuartzCore
 
-public final class MenuBarController: NSObject, NSPopoverDelegate, NSMenuDelegate {
+/// Кастомная плавающая панель в стиле macOS Control Center (принимает фокус ввода для TextField при создании/переименовании профилей)
+private final class FloatingControlPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+public final class MenuBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem?
-    private var popover: NSPopover?
+    private var panel: FloatingControlPanel?
+    private var hostingController: NSHostingController<SpatialControlView>?
     private var cancellables = Set<AnyCancellable>()
-    private var windowMoveObserver: Any?
-    private var isAdjustingFrame = false
+    
+    private var globalClickMonitor: Any?
+    private var localKeyMonitor: Any?
+    private var appResignObserver: Any?
+    
+    private var isPanelOpen = false
+    private var isAnimatingClose = false
+    private var closeWorkItem: DispatchWorkItem?
     
     public override init() {
         super.init()
         setupMenuBar()
+    }
+    
+    deinit {
+        removeEventMonitors()
     }
     
     private func setupMenuBar() {
@@ -32,13 +50,29 @@ public final class MenuBarController: NSObject, NSPopoverDelegate, NSMenuDelegat
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
         
-        let pop = NSPopover()
-        pop.contentSize = NSSize(width: 320, height: 480)
-        pop.behavior = .transient
-        pop.animates = false
-        pop.delegate = self
-        pop.contentViewController = NSHostingController(rootView: SpatialControlView())
-        self.popover = pop
+        let host = NSHostingController(rootView: SpatialControlView())
+        if #available(macOS 13.0, *) {
+            host.sizingOptions = [.intrinsicContentSize]
+        }
+        host.view.wantsLayer = true
+        host.view.layerContentsRedrawPolicy = .onSetNeedsDisplay
+        self.hostingController = host
+        
+        let p = FloatingControlPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 344, height: 530),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        p.isOpaque = false
+        p.backgroundColor = .clear
+        p.hasShadow = true
+        p.level = .statusBar
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
+        p.isMovable = false
+        p.hidesOnDeactivate = false
+        p.contentViewController = host
+        self.panel = p
     }
     
     private func updateStatusButton(isRunning: Bool) {
@@ -62,13 +96,13 @@ public final class MenuBarController: NSObject, NSPopoverDelegate, NSMenuDelegat
         if isRightClick {
             showContextMenu()
         } else {
-            togglePopover(sender)
+            togglePanel()
         }
     }
     
     private func showContextMenu() {
-        if let pop = popover, pop.isShown {
-            pop.performClose(nil)
+        if isPanelOpen {
+            closePanelAnimated()
         }
         
         let menu = NSMenu()
@@ -108,62 +142,172 @@ public final class MenuBarController: NSObject, NSPopoverDelegate, NSMenuDelegat
         NSApp.terminate(nil)
     }
     
-    @objc private func togglePopover(_ sender: AnyObject?) {
-        guard let pop = popover, let button = statusItem?.button else { return }
-        
-        if pop.isShown {
-            pop.performClose(sender)
+    private func togglePanel() {
+        if isPanelOpen && !isAnimatingClose {
+            closePanelAnimated()
         } else {
+            openPanelAnimated()
+        }
+    }
+    
+    private func calculateTargetFrame(for panel: NSPanel, relativeTo button: NSStatusBarButton) -> NSRect {
+        hostingController?.view.layoutSubtreeIfNeeded()
+        let fittingSize = hostingController?.view.fittingSize ?? NSSize(width: 344, height: 530)
+        let panelWidth: CGFloat = max(344, fittingSize.width)
+        let panelHeight: CGFloat = max(480, fittingSize.height)
+        
+        guard let buttonWindow = button.window else {
+            return NSRect(x: 100, y: 100, width: panelWidth, height: panelHeight)
+        }
+        
+        let buttonRectInWindow = button.convert(button.bounds, to: nil)
+        let buttonRectOnScreen = buttonWindow.convertToScreen(buttonRectInWindow)
+        let screen = buttonWindow.screen ?? NSScreen.main
+        let visibleFrame = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let fullFrame = screen?.frame ?? visibleFrame
+        
+        var x = round(buttonRectOnScreen.midX - panelWidth / 2.0)
+        let minX = fullFrame.minX + 10.0
+        let maxX = fullFrame.maxX - panelWidth - 10.0
+        x = max(minX, min(maxX, x))
+        
+        // Размещаем панель ровно на 6pt ниже строки меню
+        let y = round(buttonRectOnScreen.minY - panelHeight - 6.0)
+        return NSRect(x: x, y: y, width: panelWidth, height: panelHeight)
+    }
+    
+    private func openPanelAnimated() {
+        guard let panel = panel, let button = statusItem?.button else { return }
+        
+        closeWorkItem?.cancel()
+        closeWorkItem = nil
+        isAnimatingClose = false
+        
+        // Выставляем финальный frame ОДИН раз до показа, чтобы WindowServer не пересчитывал текстуру тени в каждом кадре
+        let targetFrame = calculateTargetFrame(for: panel, relativeTo: button)
+        if panel.frame != targetFrame {
+            panel.setFrame(targetFrame, display: false)
+        }
+        
+        AudioCoordinator.shared.isUIVisible = true
+        isPanelOpen = true
+        
+        panel.alphaValue = 0.0
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        
+        // Чистая аппаратная GPU-анимация CoreAnimation на слое (120 Гц без пересчёта геометрии SwiftUI и тени окна)
+        if let layer = panel.contentView?.layer {
+            layer.removeAllAnimations()
+            
+            let slide = CABasicAnimation(keyPath: "transform.translation.y")
+            slide.fromValue = 8.0
+            slide.toValue = 0.0
+            slide.duration = 0.14
+            slide.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
+            layer.add(slide, forKey: "openSlide")
+        }
+        
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.14
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.0, 0.3, 1.0)
+            panel.animator().alphaValue = 1.0
+        }
+        
+        installEventMonitors()
+        
+        // Обновляем список аудиоустройств уже после завершения анимации открытия, чтобы не блокировать главный поток
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.16) { [weak self] in
+            guard self?.isPanelOpen == true else { return }
             AudioCoordinator.shared.refreshDevices()
+        }
+    }
+    
+    public func closePanelAnimated() {
+        guard let panel = panel, isPanelOpen, !isAnimatingClose else { return }
+        
+        isAnimatingClose = true
+        removeEventMonitors()
+        
+        // Останавливаем фоновые волны сразу в начале закрытия, чтобы освободить GPU для самой анимации закрытия
+        AudioCoordinator.shared.isUIVisible = false
+        
+        if let layer = panel.contentView?.layer {
+            layer.removeAllAnimations()
             
-            NSApp.activate(ignoringOtherApps: true)
-            pop.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            
-            if let window = pop.contentViewController?.view.window {
-                window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-                window.level = .floating
-                window.makeKey()
-                clampWindowToScreen(window: window)
-                
-                if windowMoveObserver == nil {
-                    windowMoveObserver = NotificationCenter.default.addObserver(
-                        forName: NSWindow.didMoveNotification,
-                        object: window,
-                        queue: .main
-                    ) { [weak self, weak window] _ in
-                        guard let window = window else { return }
-                        self?.clampWindowToScreen(window: window)
-                    }
+            let slide = CABasicAnimation(keyPath: "transform.translation.y")
+            slide.fromValue = 0.0
+            slide.toValue = 6.0
+            slide.duration = 0.11
+            slide.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 1.0, 1.0)
+            layer.add(slide, forKey: "closeSlide")
+        }
+        
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.11
+            ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.4, 0.0, 1.0, 1.0)
+            panel.animator().alphaValue = 0.0
+        }
+        
+        let workItem = DispatchWorkItem { [weak self, weak panel] in
+            guard let self = self else { return }
+            panel?.orderOut(nil)
+            panel?.alphaValue = 1.0
+            panel?.contentView?.layer?.removeAllAnimations()
+            self.isPanelOpen = false
+            self.isAnimatingClose = false
+        }
+        closeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.115, execute: workItem)
+    }
+    
+    private func installEventMonitors() {
+        removeEventMonitors()
+        
+        // Закрытие при клике в любое место экрана вне панели (и вне иконки статус-бара)
+        globalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            guard let self = self, let panel = self.panel else { return }
+            let mouseLoc = NSEvent.mouseLocation
+            if !panel.frame.contains(mouseLoc) {
+                if let buttonWindow = self.statusItem?.button?.window,
+                   buttonWindow.frame.contains(mouseLoc) {
+                    return
                 }
+                self.closePanelAnimated()
             }
         }
-    }
-    
-    private func clampWindowToScreen(window: NSWindow) {
-        guard !isAdjustingFrame else { return }
-        guard let screen = window.screen ?? NSScreen.main else { return }
-        var frame = window.frame
-        let topBoundary = screen.frame.maxY
         
-        if frame.maxY > topBoundary {
-            isAdjustingFrame = true
-            frame.origin.y = topBoundary - frame.size.height
-            window.setFrame(frame, display: true)
-            isAdjustingFrame = false
+        // Закрытие по клавише Escape
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 { // Escape
+                self?.closePanelAnimated()
+                return nil
+            }
+            return event
+        }
+        
+        // Закрытие при переключении фокуса на другое приложение
+        appResignObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            self?.closePanelAnimated()
         }
     }
     
-    // MARK: - NSPopoverDelegate (Управление активностью UI для 0% нагрузки в фоне)
-    
-    public func popoverWillShow(_ notification: Notification) {
-        AudioCoordinator.shared.isUIVisible = true
-    }
-    
-    public func popoverDidClose(_ notification: Notification) {
-        AudioCoordinator.shared.isUIVisible = false
-        if let obs = windowMoveObserver {
+    private func removeEventMonitors() {
+        if let monitor = globalClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            globalClickMonitor = nil
+        }
+        if let monitor = localKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            localKeyMonitor = nil
+        }
+        if let obs = appResignObserver {
             NotificationCenter.default.removeObserver(obs)
-            windowMoveObserver = nil
+            appResignObserver = nil
         }
     }
 }

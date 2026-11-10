@@ -1,5 +1,45 @@
 import Foundation
+import AppKit
 import Combine
+
+public enum AppTheme: String, CaseIterable, Codable {
+    case dark = "dark"
+    case light = "light"
+}
+
+public final class ThemeManager: ObservableObject {
+    public static let shared = ThemeManager()
+    
+    private let themeKey = "SpatialAudio_App_Theme"
+    
+    @Published public var theme: AppTheme {
+        didSet {
+            UserDefaults.standard.set(theme.rawValue, forKey: themeKey)
+        }
+    }
+    
+    public var isDark: Bool {
+        theme == .dark
+    }
+    
+    private init() {
+        if let saved = UserDefaults.standard.string(forKey: themeKey),
+           let parsed = AppTheme(rawValue: saved) {
+            self.theme = parsed
+        } else {
+            // При первом запуске после установки определяем тему по системной теме macOS
+            let appleInterfaceStyle = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")?.lowercased() ?? ""
+            let isSystemDark = appleInterfaceStyle.contains("dark") ||
+                (NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+            self.theme = isSystemDark ? .dark : .light
+            UserDefaults.standard.set(self.theme.rawValue, forKey: themeKey)
+        }
+    }
+    
+    public func toggleTheme() {
+        theme = (theme == .dark) ? .light : .dark
+    }
+}
 
 public enum AppLanguage: String, CaseIterable, Codable {
     case ru = "ru"
@@ -124,7 +164,7 @@ public enum L10n {
     }
     
     public static var defaultProfileName: String {
-        isRU ? "Основной" : "Default"
+        isRU ? "Стандартный" : "Default"
     }
     
     public static func newProfileDefaultName(_ index: Int) -> String {
@@ -219,5 +259,42 @@ public enum L10n {
     
     public static var languageToggleHelp: String {
         isRU ? "Переключить язык интерфейса (RU / EN)" : "Switch interface language (RU / EN)"
+    }
+    
+    // MARK: - Режим колонок (Этап 4.5)
+    public static var modeHeadphonesTitle: String {
+        isRU ? "🎧 Наушники (HRTF)" : "🎧 Headphones (HRTF)"
+    }
+    
+    public static var modeSpeakersTitle: String {
+        isRU ? "🔊 Колонки (M/S)" : "🔊 Speakers (M/S)"
+    }
+    
+    public static var physicalSpeakerAngleLabel: String {
+        isRU ? "Реальный угол колонок:" : "Physical Speaker Angle:"
+    }
+    
+    public static var activeBtnTitle: String {
+        isRU ? "Активно" : "Active"
+    }
+    
+    public static var themeToggleHelp: String {
+        isRU ? "Переключить тему (Светлая / Тёмная)" : "Switch theme (Light / Dark)"
+    }
+    
+    public static var spatialSceneOnBadge: String {
+        isRU ? "3D Сцена: ВКЛ" : "3D Stage: ON"
+    }
+    
+    public static var bypassBadge: String {
+        isRU ? "Bypass (Прямой)" : "Bypass (Direct)"
+    }
+    
+    public static var profileHeaderLabel: String {
+        isRU ? "Профиль" : "Profile"
+    }
+    
+    public static var quitShortTitle: String {
+        isRU ? "Выйти" : "Quit"
     }
 }

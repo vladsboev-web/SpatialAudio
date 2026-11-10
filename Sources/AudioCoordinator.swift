@@ -17,9 +17,11 @@ public final class AudioCoordinator: ObservableObject {
     private lazy var spatialEngine = SpatialEngine(ringBuffer: ringBuffer)
     
     private var isApplyingProfile: Bool = false
+    private var profileSaveDebounceWorkItem: DispatchWorkItem?
     
     @Published public var isSpatialEnabled: Bool = true {
         didSet {
+            guard isSpatialEnabled != oldValue else { return }
             spatialEngine.isSpatialEnabled = isSpatialEnabled
             saveActiveProfileSettings()
         }
@@ -27,6 +29,7 @@ public final class AudioCoordinator: ObservableObject {
     
     @Published public var speakerAngleDeg: Double = 30.0 {
         didSet {
+            guard abs(speakerAngleDeg - oldValue) > 0.001 else { return }
             spatialEngine.speakerAngleDeg = Float(speakerAngleDeg)
             saveActiveProfileSettings()
         }
@@ -34,6 +37,7 @@ public final class AudioCoordinator: ObservableObject {
     
     @Published public var reverbBlend: Double = 0.01 { // 1% легкой естественной акустики (диапазон 0-3%)
         didSet {
+            guard abs(reverbBlend - oldValue) > 0.00001 else { return }
             spatialEngine.reverbBlend = Float(reverbBlend)
             saveActiveProfileSettings()
         }
@@ -41,7 +45,29 @@ public final class AudioCoordinator: ObservableObject {
     
     @Published public var volume: Double = 1.0 {
         didSet {
+            guard abs(volume - oldValue) > 0.0001 else { return }
             spatialEngine.volume = Float(volume)
+            saveActiveProfileSettings()
+        }
+    }
+
+    // MARK: - Режим колонок (Этап 4.5)
+    @Published public var isSpeakerMode: Bool = false {
+        didSet {
+            guard isSpeakerMode != oldValue else { return }
+            spatialEngine.isSpeakerMode = isSpeakerMode
+            if !isApplyingProfile {
+                if let targetProfile = ProfileManager.shared.switchMode(isSpeakerMode: isSpeakerMode) {
+                    applyProfile(targetProfile)
+                }
+            }
+        }
+    }
+
+    @Published public var physicalSpeakerAngleDeg: Double = 22.5 {
+        didSet {
+            guard abs(physicalSpeakerAngleDeg - oldValue) > 0.05 else { return }
+            spatialEngine.physicalSpeakerAngleDeg = Float(physicalSpeakerAngleDeg)
             saveActiveProfileSettings()
         }
     }
@@ -54,6 +80,22 @@ public final class AudioCoordinator: ObservableObject {
     @Published public var isRunning: Bool = false
     @Published public var isBlackHoleInstalled: Bool = false
     @Published public var statusMessage: String = L10n.readyToStart
+    
+    private enum StatusState {
+        case readyToStart
+        case stopped
+        case routingSystemAudio
+        case connectingTo(String)
+        case devicesNotFound
+        case outputError(String)
+        case pausedOnDevice(String)
+        case active(String, Int, Bool)
+    }
+    private var currentStatusState: StatusState = .readyToStart {
+        didSet {
+            updateLocalizedStatusMessage()
+        }
+    }
     
     @Published public var leftLevel: Float = 0.0
     @Published public var rightLevel: Float = 0.0
@@ -74,26 +116,45 @@ public final class AudioCoordinator: ObservableObject {
     private var currentSessionVolume: Float32 = 0.5
     private var blackHoleVolumeListenerBlock: AudioObjectPropertyListenerBlock?
     private var monitoredBlackHoleID: AudioDeviceID?
+    
+    // MARK: - Управление состоянием сессии и переходов устройств
+    
+    /// Истинное состояние: включил ли пользователь Spatial Audio (не сбрасывается при реконфигурации/подключении/отключении наушников)
+    private var isActiveSession: Bool = false
+    
+    /// Набор полных сигнатур всех устройств (ID + hasOutput + hasInput + dataSourceID + name)
+    private var lastKnownDeviceSignatures: Set<AudioDevice> = []
+    /// Стабильный снимок физических устройств вывода (обновляется после обработки событий хот-плага)
+    private var stableOutputDeviceMap: [AudioDeviceID: AudioDevice] = [:]
+    /// Время последнего аппаратного изменения списка/потоков устройств (для точного отделения автопереключения macOS от ручного выбора)
+    private var lastHardwareTopologyChangeTime: TimeInterval = 0
+    
     private var deviceChangeDebounceWorkItem: DispatchWorkItem?
+    private var btStreamDiscoveryWorkItems: [DispatchWorkItem] = []
     private var previousOutputDeviceID: AudioDeviceID?
-    private var lastKnownHardwareDeviceIDs: Set<AudioDeviceID> = []
-    private var pendingConnectedHeadphonesID: AudioDeviceID?
-    private var isConnectingHeadphones: Bool = false
+    private var pendingConnectedDeviceID: AudioDeviceID?
+    private var isConnectingDevice: Bool = false
     private var isHandlingDeviceDisconnection: Bool = false
-    private var connectingHeadphonesResetWorkItem: DispatchWorkItem?
+    private var connectingDeviceResetWorkItem: DispatchWorkItem?
     private var disconnectingDeviceResetWorkItem: DispatchWorkItem?
     private var pipelineRetryWorkItem: DispatchWorkItem?
     private var safetyRoutingWorkItem: DispatchWorkItem?
     private var volumeReinforceWorkItems: [DispatchWorkItem] = []
-    private var wasStreamingActive: Bool = false
     private var pipelineRetryCount: Int = 0
+    
+    /// Флаг: нужно ли возобновить системное медиавоспроизведение после завершения инициализации нового/резервного устройства
+    private var shouldResumeMediaAfterTransition: Bool = false
+    /// Активные слушатели потоков/источников на физических устройствах
+    private var devicePropertyListenerBlocks: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
     
     private init() {
         if let currentProfile = ProfileManager.shared.activeProfile {
             applyProfile(currentProfile)
         }
         refreshDevices(preserveUserSelection: false)
-        self.lastKnownHardwareDeviceIDs = Set(AudioDeviceHelper.getAllDevices().map { $0.id })
+        let initialDevs = AudioDeviceHelper.getAllDevices()
+        self.lastKnownDeviceSignatures = Set(initialDevs)
+        self.updateStableOutputSnapshot(from: initialDevs)
         
         // Синхронизируем выход с текущим активным физическим устройством в macOS
         if let currentDef = AudioDeviceHelper.getDefaultOutputDeviceID(),
@@ -117,13 +178,23 @@ public final class AudioCoordinator: ObservableObject {
         }
         
         setupHardwareListeners()
+        syncPerDevicePropertyListeners(devices: initialDevs)
         
         // Если в системе уже выбран BlackHole — сразу автоматически запускаем
         if let currentDef = AudioDeviceHelper.getDefaultOutputDeviceID(),
            let bh = AudioDeviceHelper.findBlackHoleDevice(),
            currentDef == bh.id {
+            self.isActiveSession = true
             startPipeline(routeSystemAudio: false)
         }
+    }
+    
+    private func updateStableOutputSnapshot(from allDevs: [AudioDevice]) {
+        var map: [AudioDeviceID: AudioDevice] = [:]
+        for dev in allDevs where dev.hasOutput && !dev.isVirtual && !dev.isInternalAggregate {
+            map[dev.id] = dev
+        }
+        self.stableOutputDeviceMap = map
     }
     
     // MARK: - Явный выбор устройств пользователем в UI
@@ -131,7 +202,7 @@ public final class AudioCoordinator: ObservableObject {
     public func selectInputDeviceByUser(_ newID: AudioDeviceID) {
         guard newID != 0 && newID != selectedInputDeviceID else { return }
         selectedInputDeviceID = newID
-        if isRunning {
+        if isActiveSession || isRunning {
             restartPipeline()
         }
     }
@@ -146,27 +217,43 @@ public final class AudioCoordinator: ObservableObject {
         if let dev = AudioDeviceHelper.getDevice(id: newID), !dev.isVirtual && dev.hasOutput {
             savedSystemDefaultOutputDeviceID = newID
         }
-        if isRunning {
+        if isActiveSession || isRunning {
             restartPipeline()
         }
     }
     
-    // MARK: - Управление профилями (Синхронизация)
+    // MARK: - Управление профилями (Синхронизация с debounce 350 мс)
     
     private func saveActiveProfileSettings() {
         guard !isApplyingProfile else { return }
-        ProfileManager.shared.updateActiveProfileSettings(
-            isSpatialEnabled: isSpatialEnabled,
-            speakerAngleDeg: speakerAngleDeg,
-            reverbBlend: reverbBlend,
-            volume: volume
-        )
+        profileSaveDebounceWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self = self, !self.isApplyingProfile else { return }
+            ProfileManager.shared.updateActiveProfileSettings(
+                isSpatialEnabled: self.isSpatialEnabled,
+                speakerAngleDeg: self.speakerAngleDeg,
+                reverbBlend: self.reverbBlend,
+                volume: self.volume,
+                isSpeakerMode: self.isSpeakerMode,
+                physicalSpeakerAngleDeg: self.physicalSpeakerAngleDeg
+            )
+        }
+        profileSaveDebounceWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
     
     public func applyProfile(_ profile: SpatialProfile) {
+        profileSaveDebounceWorkItem?.cancel()
         isApplyingProfile = true
+        let mode = profile.isSpeakerMode ?? ProfileManager.shared.currentModeIsSpeaker
+        ProfileManager.shared.switchMode(isSpeakerMode: mode)
+        self.isSpeakerMode = mode
         self.isSpatialEnabled = profile.isSpatialEnabled
-        self.speakerAngleDeg = profile.speakerAngleDeg
+        if mode {
+            self.physicalSpeakerAngleDeg = profile.physicalSpeakerAngleDeg ?? 22.5
+        } else {
+            self.speakerAngleDeg = profile.speakerAngleDeg
+        }
         self.reverbBlend = min(0.03, max(0.0, profile.reverbBlend))
         self.volume = profile.volume
         isApplyingProfile = false
@@ -181,7 +268,7 @@ public final class AudioCoordinator: ObservableObject {
         let devID = self.selectedOutputDeviceID
         guard devID != 0 else { return }
         let isSettable = AudioDeviceHelper.isVolumeSettable(deviceID: devID)
-        if isRunning || pendingTargetSystemDefaultID != nil || isConnectingHeadphones || isHandlingDeviceDisconnection {
+        if isActiveSession || isRunning || pendingTargetSystemDefaultID != nil || isConnectingDevice || isHandlingDeviceDisconnection {
             if isSettable {
                 let currentDevVol = AudioDeviceHelper.getDeviceVolume(deviceID: devID)
                 if currentDevVol == nil || abs((currentDevVol ?? 0) - volume) > 0.01 {
@@ -215,22 +302,34 @@ public final class AudioCoordinator: ObservableObject {
         return AudioDeviceHelper.getDevice(id: selectedOutputDeviceID)?.name ?? L10n.headphonesFallback
     }
     
+    private func updateLocalizedStatusMessage() {
+        switch currentStatusState {
+        case .readyToStart:
+            statusMessage = L10n.readyToStart
+        case .stopped:
+            statusMessage = L10n.stopped
+        case .routingSystemAudio:
+            statusMessage = L10n.routingSystemAudio
+        case .connectingTo(let name):
+            statusMessage = L10n.connectingTo(name)
+        case .devicesNotFound:
+            statusMessage = L10n.devicesNotFound
+        case .outputError(let name):
+            statusMessage = L10n.outputError(name)
+        case .pausedOnDevice(let name):
+            statusMessage = L10n.pausedOnDevice(name)
+        case .active(let name, let pct, let isMuted):
+            statusMessage = isMuted ? L10n.spatialAudioMuted(name) : L10n.spatialAudioActive(name, pct)
+        }
+    }
+    
     public func refreshLocalizedStatus() {
         if isRunning {
             let isMuted = AudioDeviceHelper.isDeviceMuted(deviceID: selectedInputDeviceID)
             let pct = Int(round(currentSessionVolume * 100))
-            if isMuted {
-                statusMessage = L10n.spatialAudioMuted(currentOutputDeviceName())
-            } else {
-                statusMessage = L10n.spatialAudioActive(currentOutputDeviceName(), pct)
-            }
-        } else if statusMessage == "Готов к запуску" || statusMessage == "Ready to start" {
-            statusMessage = L10n.readyToStart
-        } else if statusMessage == "Остановлено" || statusMessage == "Stopped" {
-            statusMessage = L10n.stopped
-        } else if statusMessage.hasPrefix("Приостановлено (") || statusMessage.hasPrefix("Paused (") {
-            let devName = AudioDeviceHelper.getDefaultOutputDeviceID().flatMap { AudioDeviceHelper.getDevice(id: $0)?.name } ?? currentOutputDeviceName()
-            statusMessage = L10n.pausedOnDevice(devName)
+            currentStatusState = .active(currentOutputDeviceName(), pct, isMuted)
+        } else {
+            updateLocalizedStatusMessage()
         }
     }
     
@@ -246,11 +345,7 @@ public final class AudioCoordinator: ObservableObject {
                 DispatchQueue.main.async {
                     self.syncSessionVolumeToOutputs(volume: effectiveVol)
                     let pct = Int(round(vol * 100))
-                    if isMuted {
-                        self.statusMessage = L10n.spatialAudioMuted(self.currentOutputDeviceName())
-                    } else {
-                        self.statusMessage = L10n.spatialAudioActive(self.currentOutputDeviceName(), pct)
-                    }
+                    self.currentStatusState = .active(self.currentOutputDeviceName(), pct, isMuted)
                     debugLog("[AudioCoordinator] Системная громкость BlackHole -> \(vol) (\(pct)%), muted=\(isMuted)")
                 }
             }
@@ -306,49 +401,41 @@ public final class AudioCoordinator: ObservableObject {
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        if AudioObjectHasProperty(bhID, &addrVMVC) {
-            AudioObjectRemovePropertyListenerBlock(bhID, &addrVMVC, DispatchQueue.main, block)
-        }
+        AudioObjectRemovePropertyListenerBlock(bhID, &addrVMVC, DispatchQueue.main, block)
         
         var addrMain = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        if AudioObjectHasProperty(bhID, &addrMain) {
-            AudioObjectRemovePropertyListenerBlock(bhID, &addrMain, DispatchQueue.main, block)
-        }
+        AudioObjectRemovePropertyListenerBlock(bhID, &addrMain, DispatchQueue.main, block)
         
         var addrCh1 = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: 1
         )
-        if AudioObjectHasProperty(bhID, &addrCh1) {
-            AudioObjectRemovePropertyListenerBlock(bhID, &addrCh1, DispatchQueue.main, block)
-        }
+        AudioObjectRemovePropertyListenerBlock(bhID, &addrCh1, DispatchQueue.main, block)
         
         var addrMute = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        if AudioObjectHasProperty(bhID, &addrMute) {
-            AudioObjectRemovePropertyListenerBlock(bhID, &addrMute, DispatchQueue.main, block)
-        }
+        AudioObjectRemovePropertyListenerBlock(bhID, &addrMute, DispatchQueue.main, block)
         
         self.blackHoleVolumeListenerBlock = nil
         self.monitoredBlackHoleID = nil
     }
     
-    // MARK: - CoreAudio Hardware Listeners (Горячее подключение наушников и системное переключение)
+    // MARK: - CoreAudio Hardware Listeners (Горячее подключение наушников/BT и системное переключение)
     
-    private func scheduleResetConnectingHeadphones(delay: TimeInterval) {
-        connectingHeadphonesResetWorkItem?.cancel()
+    private func scheduleResetConnectingDevice(delay: TimeInterval) {
+        connectingDeviceResetWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
-            self?.isConnectingHeadphones = false
+            self?.isConnectingDevice = false
         }
-        connectingHeadphonesResetWorkItem = item
+        connectingDeviceResetWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
     }
     
@@ -370,13 +457,97 @@ public final class AudioCoordinator: ObservableObject {
     
     private func scheduleVolumeReinforcement(for deviceID: AudioDeviceID) {
         cancelVolumeReinforcement()
-        for delay in [0.6, 1.2, 2.0] {
+        for delay in [0.5, 1.1, 2.0, 3.0] {
             let item = DispatchWorkItem { [weak self] in
-                guard let self = self, self.isRunning, self.selectedOutputDeviceID == deviceID else { return }
+                guard let self = self, self.isActiveSession, self.selectedOutputDeviceID == deviceID else { return }
                 AudioDeviceHelper.setDeviceVolume(deviceID: deviceID, volume: self.currentSessionVolume)
             }
             volumeReinforceWorkItems.append(item)
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+    
+    /// Планируем серию отложенных проверок при подключении Bluetooth-устройства,
+    /// чтобы гарантированно подгрузить его в список, когда профиль A2DP откроет выходные потоки (hasOutput == true)
+    private func scheduleBluetoothStreamDiscoveryPolls() {
+        for item in btStreamDiscoveryWorkItems {
+            item.cancel()
+        }
+        btStreamDiscoveryWorkItems.removeAll()
+        
+        for delay in [0.35, 0.8, 1.5, 2.5, 3.8] {
+            let item = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                let allDevs = AudioDeviceHelper.getAllDevices()
+                let currentSet = Set(allDevs)
+                if currentSet != self.lastKnownDeviceSignatures {
+                    debugLog("[AudioCoordinator] BT Stream Discovery poll at \(delay)s detected newly ready streams!")
+                    self.handleHardwareDevicesChanged()
+                } else {
+                    let liveOuts = allDevs.filter { $0.hasOutput && !$0.isVirtual }
+                    if liveOuts != self.outputDevices {
+                        self.refreshDevices(preserveUserSelection: true)
+                    }
+                }
+            }
+            btStreamDiscoveryWorkItems.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+        }
+    }
+    
+    /// Подписка на изменения потоков (kAudioDevicePropertyStreams) и источника (kAudioDevicePropertyDataSource) каждого устройства
+    private func syncPerDevicePropertyListeners(devices: [AudioDevice]) {
+        let currentIDs = Set(devices.filter { !$0.isVirtual && !$0.isInternalAggregate }.map { $0.id })
+        
+        // Удаляем слушатели для отключенных устройств
+        for (oldID, block) in devicePropertyListenerBlocks where !currentIDs.contains(oldID) {
+            for scope in [kAudioObjectPropertyScopeGlobal, kAudioDevicePropertyScopeInput, kAudioDevicePropertyScopeOutput] {
+                var streamsAddr = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyStreams,
+                    mScope: scope,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                AudioObjectRemovePropertyListenerBlock(oldID, &streamsAddr, DispatchQueue.main, block)
+            }
+            
+            var dataSourceAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDataSource,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(oldID, &dataSourceAddr, DispatchQueue.main, block)
+            devicePropertyListenerBlocks.removeValue(forKey: oldID)
+        }
+        
+        // Добавляем слушатели для новых физических устройств (особенно Bluetooth, где потоки появляются позже)
+        for id in currentIDs where devicePropertyListenerBlocks[id] == nil {
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                guard let self = self else { return }
+                debugLog("[AudioCoordinator] Per-device stream/datasource property changed for device \(id)")
+                self.lastHardwareTopologyChangeTime = ProcessInfo.processInfo.systemUptime
+                self.handleHardwareDevicesChanged()
+            }
+            devicePropertyListenerBlocks[id] = block
+            
+            for scope in [kAudioObjectPropertyScopeGlobal, kAudioDevicePropertyScopeInput, kAudioDevicePropertyScopeOutput] {
+                var streamsAddr = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyStreams,
+                    mScope: scope,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                if AudioObjectHasProperty(id, &streamsAddr) {
+                    AudioObjectAddPropertyListenerBlock(id, &streamsAddr, DispatchQueue.main, block)
+                }
+            }
+            
+            var dataSourceAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyDataSource,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            if AudioObjectHasProperty(id, &dataSourceAddr) {
+                AudioObjectAddPropertyListenerBlock(id, &dataSourceAddr, DispatchQueue.main, block)
+            }
         }
     }
     
@@ -408,58 +579,116 @@ public final class AudioCoordinator: ObservableObject {
         }
     }
     
+    /// Начать подготовку к переключению устройства: если приложение активно, принудительно удерживаем BlackHole
+    /// и ставим системное воспроизведение на паузу на время инициализации нового выхода
+    private func beginHardwareTransitionIfActive() {
+        guard isActiveSession else { return }
+        if let bh = AudioDeviceHelper.findBlackHoleDevice() {
+            if AudioDeviceHelper.getDefaultOutputDeviceID() != bh.id {
+                AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+            }
+        }
+        // Проверяем, играет ли сейчас системное медиа, и ставим на паузу на время переключения
+        AudioDeviceHelper.pauseSystemMediaIfPlaying { [weak self] didPause in
+            guard let self = self else { return }
+            if didPause {
+                debugLog("[AudioCoordinator] Системное воспроизведение поставлено на паузу на время инициализации устройства")
+                self.shouldResumeMediaAfterTransition = true
+            }
+        }
+    }
+    
     private func handleHardwareDevicesChanged() {
         let allDevs = AudioDeviceHelper.getAllDevices()
-        let currentDeviceIDSet = Set(allDevs.map { $0.id })
+        syncPerDevicePropertyListeners(devices: allDevs)
+        
+        let currentSignatureSet = Set(allDevs)
         
         // Игнорируем ложные срабатывания от создания/удаления внутренних CADefaultDeviceAggregate,
-        // если список реальных физических устройств не изменился и нет активного перехода
-        if currentDeviceIDSet == self.lastKnownHardwareDeviceIDs &&
-           self.pendingConnectedHeadphonesID == nil &&
+        // если сигнатуры всех реальных устройств (ID + hasOutput + hasInput + dataSource + name) не изменились
+        if currentSignatureSet == self.lastKnownDeviceSignatures &&
+           self.pendingConnectedDeviceID == nil &&
+           !self.isConnectingDevice &&
            !self.isHandlingDeviceDisconnection {
             return
         }
-        self.lastKnownHardwareDeviceIDs = currentDeviceIDSet
+        
+        // Проверяем, появились ли новые устройства вообще (даже если у BT еще hasOutput == false)
+        let previousIDs = Set(self.lastKnownDeviceSignatures.map { $0.id })
+        let currentIDs = Set(allDevs.map { $0.id })
+        if currentIDs != previousIDs {
+            self.lastHardwareTopologyChangeTime = ProcessInfo.processInfo.systemUptime
+            scheduleBluetoothStreamDiscoveryPolls()
+        }
+        
+        self.lastKnownDeviceSignatures = currentSignatureSet
         
         let currentOuts = allDevs.filter { $0.hasOutput && !$0.isVirtual && !$0.isInternalAggregate }
-        let newOuts = currentOuts.filter { newDev in !self.outputDevices.contains(where: { $0.id == newDev.id }) }
-        let shouldKeepStreaming = self.isRunning || self.wasStreamingActive
         
-        // 1. Быстрая предварительная проверка: появились ли новые наушники/Bluetooth с выходом звука
-        if let newHeadphones = newOuts.first(where: { ($0.isBluetooth || $0.isHeadphones) && $0.hasOutput }) {
-            debugLog("[AudioCoordinator] Pre-detected connecting headphones: \(newHeadphones.name) (\(newHeadphones.id))")
-            self.isConnectingHeadphones = true
-            self.pendingConnectedHeadphonesID = newHeadphones.id
+        // Сравниваем со стабильным снимком выходных устройств (чтобы видеть появление hasOutput или смену dataSourceID на разъеме наушников)
+        let newlyAvailableOuts = currentOuts.filter { cur in
+            guard let prev = self.stableOutputDeviceMap[cur.id] else {
+                return true // Полностью новый AudioDeviceID с выходом
+            }
+            // Или у существующего устройства изменился источник (например, подключили проводные наушники в Built-in)
+            return prev.dataSourceID != cur.dataSourceID && cur.isHeadphones
+        }
+        
+        let disappearedOutIDs = Set(self.stableOutputDeviceMap.keys).subtracting(Set(currentOuts.map { $0.id }))
+        let didBuiltInHeadphonesUnplug: Bool = {
+            if let curSelected = currentOuts.first(where: { $0.id == self.selectedOutputDeviceID }),
+               let prevSelected = self.stableOutputDeviceMap[self.selectedOutputDeviceID] {
+                return prevSelected.dataSourceID != curSelected.dataSourceID && prevSelected.isHeadphones && !curSelected.isHeadphones
+            }
+            return false
+        }()
+        
+        if !newlyAvailableOuts.isEmpty || !disappearedOutIDs.isEmpty || didBuiltInHeadphonesUnplug {
+            self.lastHardwareTopologyChangeTime = ProcessInfo.processInfo.systemUptime
+        }
+        
+        // 1. Быстрая предварительная проверка: появилось ли новое выходное устройство (наушники, любое BT-устройство или внешняя карта)
+        if let newDev = newlyAvailableOuts.first(where: { $0.isBluetooth || $0.isHeadphones || !$0.isBuiltIn }) ?? newlyAvailableOuts.first {
+            debugLog("[AudioCoordinator] Pre-detected connecting output device: \(newDev.name) (\(newDev.id), BT=\(newDev.isBluetooth))")
+            self.isConnectingDevice = true
+            self.pendingConnectedDeviceID = newDev.id
             
             // Заблаговременно сохраняем предыдущее устройство до любых обновлений списков
-            if self.selectedOutputDeviceID != 0 && self.selectedOutputDeviceID != newHeadphones.id {
-                if let curDev = self.outputDevices.first(where: { $0.id == self.selectedOutputDeviceID }), !curDev.isVirtual {
+            if self.selectedOutputDeviceID != 0 && self.selectedOutputDeviceID != newDev.id {
+                if let curDev = self.stableOutputDeviceMap[self.selectedOutputDeviceID], !curDev.isVirtual {
                     self.previousOutputDeviceID = curDev.id
-                    debugLog("[AudioCoordinator] Pre-saved previous device before headphones: \(curDev.name) (\(curDev.id))")
+                    debugLog("[AudioCoordinator] Pre-saved previous device: \(curDev.name) (\(curDev.id))")
                 }
             }
             
-            // 🛡️ Защита от удара 100%: удерживаем BlackHole дефолтом, только если приложение было активно
-            if shouldKeepStreaming, let bh = AudioDeviceHelper.findBlackHoleDevice() {
-                AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
-            }
-            
-            scheduleResetConnectingHeadphones(delay: 2.5)
+            beginHardwareTransitionIfActive()
+            scheduleResetConnectingDevice(delay: 4.0)
         }
         
-        // 2. Быстрая предварительная проверка: отключилось ли текущее устройство вывода (наушники убраны в кейс)
-        if self.selectedOutputDeviceID != 0 && !currentOuts.contains(where: { $0.id == self.selectedOutputDeviceID }) {
-            debugLog("[AudioCoordinator] Pre-detected disconnection of current output device: \(self.selectedOutputDeviceID)")
+        // 2. Быстрая предварительная проверка: отключилось ли текущее или любое внешнее устройство вывода
+        let didCurrentDisappear = (self.selectedOutputDeviceID != 0 && !currentOuts.contains(where: { $0.id == self.selectedOutputDeviceID })) || didBuiltInHeadphonesUnplug
+        if didCurrentDisappear || !disappearedOutIDs.isEmpty {
+            debugLog("[AudioCoordinator] Pre-detected device disconnection (currentDisappeared=\(didCurrentDisappear), disappearedIDs=\(disappearedOutIDs))")
             self.isHandlingDeviceDisconnection = true
             
-            if shouldKeepStreaming, let bh = AudioDeviceHelper.findBlackHoleDevice() {
-                AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+            if didCurrentDisappear && self.isActiveSession {
+                // При отключении наушников macOS часто сама ставит плеер на паузу, поэтому запоминаем,
+                // работал ли сейчас звук (по уровню сигнала ИЛИ по статусу MediaRemote), чтобы возобновить воспроизведение
+                let hadRecentAudioSignal = (self.captureUnit.peakLevelL > 0.0005 || self.captureUnit.peakLevelR > 0.0005)
+                if hadRecentAudioSignal {
+                    self.shouldResumeMediaAfterTransition = true
+                }
             }
             
-            scheduleResetDisconnectingDevice(delay: 2.0)
+            beginHardwareTransitionIfActive()
+            scheduleResetDisconnectingDevice(delay: 3.5)
         }
         
-        // Устраняем дребезг (debounce 500 мс) для завершения Bluetooth handshake в macOS
+        // Немедленно обновляем публичные списки inputDevices / outputDevices, чтобы UI всегда видел актуальные носители
+        self.inputDevices = allDevs.filter { $0.hasInput }
+        self.outputDevices = currentOuts
+        
+        // Устраняем дребезг (debounce 450 мс) для завершения Bluetooth handshake в macOS
         deviceChangeDebounceWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
@@ -467,99 +696,165 @@ public final class AudioCoordinator: ObservableObject {
             self.performHardwareDevicesChanged()
         }
         deviceChangeDebounceWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: workItem)
     }
     
     private func performHardwareDevicesChanged() {
-        let oldDevices = self.outputDevices
+        let allDevs = AudioDeviceHelper.getAllDevices()
+        let currentOuts = allDevs.filter { $0.hasOutput && !$0.isVirtual && !$0.isInternalAggregate }
         let oldSelectedOutputID = self.selectedOutputDeviceID
+        let oldStableMap = self.stableOutputDeviceMap
         
-        // Обновляем списки устройств, сохраняя текущий выбор, чтобы не затереть oldSelectedOutputID раньше времени
+        // Обновляем стабильный снимок и списки UI
+        updateStableOutputSnapshot(from: allDevs)
         refreshDevices(preserveUserSelection: true)
         
-        // 1. Проверяем, появились ли новые Bluetooth-наушники или гарнитура
-        var newlyConnectedBT = self.outputDevices.first(where: { newDev in
-            !oldDevices.contains(where: { $0.id == newDev.id }) && (newDev.isBluetooth || newDev.isHeadphones) && newDev.hasOutput
+        // 1. Проверяем, появилось ли новое устройство вывода (Bluetooth, наушники, USB и т.д.)
+        var newlyConnectedDev = currentOuts.first(where: { newDev in
+            guard let prev = oldStableMap[newDev.id] else {
+                return true
+            }
+            return prev.dataSourceID != newDev.dataSourceID && newDev.isHeadphones
         })
-        if newlyConnectedBT == nil, let pendingID = self.pendingConnectedHeadphonesID {
-            newlyConnectedBT = self.outputDevices.first(where: { $0.id == pendingID })
+        if newlyConnectedDev == nil, let pendingID = self.pendingConnectedDeviceID {
+            newlyConnectedDev = currentOuts.first(where: { $0.id == pendingID })
         }
-        self.pendingConnectedHeadphonesID = nil
+        self.pendingConnectedDeviceID = nil
         
-        if let newlyConnectedBT = newlyConnectedBT {
-            debugLog("[AudioCoordinator] Подключены новые наушники: \(newlyConnectedBT.name) (\(newlyConnectedBT.id))")
+        if let newlyConnected = newlyConnectedDev {
+            debugLog("[AudioCoordinator] Подключено новое устройство вывода: \(newlyConnected.name) (\(newlyConnected.id))")
             
-            // Сохраняем физическое устройство, которое было активно ДО подключения этих наушников, и возвращаем ему сессионную громкость
-            if oldSelectedOutputID != 0 && oldSelectedOutputID != newlyConnectedBT.id {
-                if let prevDev = oldDevices.first(where: { $0.id == oldSelectedOutputID }), !prevDev.isVirtual {
+            // Сохраняем физическое устройство, которое было активно ДО подключения, и возвращаем ему сессионную громкость
+            if oldSelectedOutputID != 0 && oldSelectedOutputID != newlyConnected.id {
+                if let prevDev = oldStableMap[oldSelectedOutputID], !prevDev.isVirtual {
                     self.previousOutputDeviceID = prevDev.id
                     AudioDeviceHelper.setDeviceVolume(deviceID: prevDev.id, volume: self.currentSessionVolume)
-                    debugLog("[AudioCoordinator] Запомнили предыдущее устройство до наушников: \(prevDev.name) (\(prevDev.id))")
+                    debugLog("[AudioCoordinator] Запомнили предыдущее устройство: \(prevDev.name) (\(prevDev.id))")
                 }
             }
             
-            self.selectedOutputDeviceID = newlyConnectedBT.id
-            self.savedSystemDefaultOutputDeviceID = newlyConnectedBT.id
+            self.selectedOutputDeviceID = newlyConnected.id
+            self.savedSystemDefaultOutputDeviceID = newlyConnected.id
             
-            let shouldResume = self.isRunning || self.wasStreamingActive
-            self.isRunning = false
-            self.stopAudioUnitsOnly()
-            
-            if shouldResume {
-                debugLog("[AudioCoordinator] Возобновляем воспроизведение на новых наушниках")
+            if self.isActiveSession {
+                debugLog("[AudioCoordinator] Сессия активна -> переключаем вывод на \(newlyConnected.name) и удерживаем BlackHole")
+                self.stopAudioUnitsOnly()
+                self.currentStatusState = .connectingTo(newlyConnected.name)
+                if let bh = AudioDeviceHelper.findBlackHoleDevice() {
+                    AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+                }
                 self.pipelineRetryCount = 0
                 self.startPipeline(routeSystemAudio: true)
-                scheduleVolumeReinforcement(for: newlyConnectedBT.id)
+                scheduleVolumeReinforcement(for: newlyConnected.id)
             } else {
-                self.isConnectingHeadphones = false
+                self.isConnectingDevice = false
             }
             return
         }
         
-        // 2. Проверяем, отключились ли текущие наушники / устройство вывода
-        let didCurrentDisconnect = self.isHandlingDeviceDisconnection ||
-            (oldSelectedOutputID != 0 && !self.outputDevices.contains(where: { $0.id == oldSelectedOutputID }))
-        
-        if didCurrentDisconnect {
-            debugLog("[AudioCoordinator] Выбранное устройство вывода отключено (\(oldSelectedOutputID))")
-            
-            var fallbackDev: AudioDevice? = nil
-            if let prevID = self.previousOutputDeviceID,
-               let prevDev = self.outputDevices.first(where: { $0.id == prevID }) {
-                fallbackDev = prevDev
-                debugLog("[AudioCoordinator] Возврат на источник до наушников: \(prevDev.name) (\(prevDev.id))")
-            } else {
-                fallbackDev = AudioDeviceHelper.findPreferredOutputDevice()
-                debugLog("[AudioCoordinator] Предыдущий источник недоступен, возврат на preferred: \(fallbackDev?.name ?? "none")")
+        // 2. Проверяем, отключилось ли текущее устройство вывода (наушники/BT выключены или убраны в кейс, либо выдернут 3.5мм разъем)
+        let didBuiltInHeadphonesUnplug: Bool = {
+            if let curSelected = currentOuts.first(where: { $0.id == oldSelectedOutputID }),
+               let prevSelected = oldStableMap[oldSelectedOutputID] {
+                return prevSelected.dataSourceID != curSelected.dataSourceID && prevSelected.isHeadphones && !curSelected.isHeadphones
             }
-            
-            if let fallback = fallbackDev {
-                self.selectedOutputDeviceID = fallback.id
-                self.savedSystemDefaultOutputDeviceID = fallback.id
-                self.previousOutputDeviceID = nil // Сбрасываем, так как уже вернулись
+            return false
+        }()
+        
+        let didCurrentDisconnect = (oldSelectedOutputID != 0 && !currentOuts.contains(where: { $0.id == oldSelectedOutputID })) || didBuiltInHeadphonesUnplug
+        
+        if didCurrentDisconnect || self.isHandlingDeviceDisconnection {
+            if didCurrentDisconnect {
+                debugLog("[AudioCoordinator] Выбранное устройство вывода отключено (\(oldSelectedOutputID))")
                 
-                let shouldResume = self.isRunning || self.wasStreamingActive
-                self.isRunning = false
-                self.stopAudioUnitsOnly()
+                var fallbackDev: AudioDevice? = nil
+                if let prevID = self.previousOutputDeviceID,
+                   let prevDev = currentOuts.first(where: { $0.id == prevID }) {
+                    fallbackDev = prevDev
+                    debugLog("[AudioCoordinator] Возврат на предыдущее устройство: \(prevDev.name) (\(prevDev.id))")
+                } else {
+                    fallbackDev = AudioDeviceHelper.findPreferredOutputDevice()
+                    debugLog("[AudioCoordinator] Возврат на предпочтительное устройство: \(fallbackDev?.name ?? "none")")
+                }
                 
-                if shouldResume {
-                    if let bh = AudioDeviceHelper.findBlackHoleDevice() {
-                        AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+                if let fallback = fallbackDev {
+                    self.selectedOutputDeviceID = fallback.id
+                    self.savedSystemDefaultOutputDeviceID = fallback.id
+                    self.previousOutputDeviceID = nil
+                    
+                    if self.isActiveSession {
+                        self.stopAudioUnitsOnly()
+                        self.currentStatusState = .connectingTo(fallback.name)
+                        if let bh = AudioDeviceHelper.findBlackHoleDevice() {
+                            AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+                        }
+                        self.pipelineRetryCount = 0
+                        self.startPipeline(routeSystemAudio: true)
+                        scheduleVolumeReinforcement(for: fallback.id)
                     }
+                    scheduleResetDisconnectingDevice(delay: 1.5)
+                } else {
+                    self.isHandlingDeviceDisconnection = false
+                }
+            } else if self.isActiveSession {
+                // Отключилось какое-то другое внешнее устройство, но macOS могла сбросить дефолт с BlackHole
+                if let bh = AudioDeviceHelper.findBlackHoleDevice(),
+                   AudioDeviceHelper.getDefaultOutputDeviceID() != bh.id {
+                    AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+                }
+                if !self.isRunning {
                     self.pipelineRetryCount = 0
                     self.startPipeline(routeSystemAudio: true)
                 }
-                scheduleResetDisconnectingDevice(delay: 0.5)
+                scheduleResetDisconnectingDevice(delay: 1.0)
             } else {
                 self.isHandlingDeviceDisconnection = false
-                self.stopPipeline(restoreSystemAudio: false)
             }
         }
     }
     
+    /// Определяет, вызвана ли смена системного устройства вывода автоматической реакцией macOS на подключение/отключение оборудования,
+    /// или пользователь переключил устройство вручную в меню macOS.
+    private func isSystemAutoSwitchDueToHardwareEvent(newDefaultID: AudioDeviceID, liveOuts: [AudioDevice]) -> Bool {
+        // 1. Явные флаги активного процесса подключения/отключения или debounce-таймера
+        if isConnectingDevice || isHandlingDeviceDisconnection || deviceChangeDebounceWorkItem != nil || pipelineRetryWorkItem != nil {
+            return true
+        }
+        
+        // 2. Временнóе окно после любого аппаратного события (Bluetooth профили и отключение носителей занимают до 3.5 сек)
+        let elapsedSinceTopologyChange = ProcessInfo.processInfo.systemUptime - lastHardwareTopologyChangeTime
+        if elapsedSinceTopologyChange < 3.5 {
+            return true
+        }
+        
+        // 3. Прямая сверка живой топологии со стабильным снимком (на случай, если колбэк DefaultOutputDevice пришел раньше Devices):
+        // 3а. Исчезло ли хотя бы одно выходное устройство из стабильного снимка?
+        let liveOutIDs = Set(liveOuts.map { $0.id })
+        let stableOutIDs = Set(stableOutputDeviceMap.keys)
+        if !stableOutIDs.isSubset(of: liveOutIDs) {
+            return true
+        }
+        
+        // 3б. Появилось ли новое выходное устройство, которого еще не было в стабильном снимке?
+        if !liveOutIDs.isSubset(of: stableOutIDs) {
+            return true
+        }
+        
+        // 3в. Изменился ли dataSourceID на выбранном или новом дефолтном устройстве (например, разъем проводных наушников)?
+        for dev in liveOuts {
+            if let oldDev = stableOutputDeviceMap[dev.id], oldDev.dataSourceID != dev.dataSourceID {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
     private func handleDefaultOutputDeviceChanged() {
         guard let currentDefault = AudioDeviceHelper.getDefaultOutputDeviceID() else { return }
-        debugLog("[AudioCoordinator] handleDefaultOutputDeviceChanged: currentDefault=\(currentDefault), pending=\(String(describing: pendingTargetSystemDefaultID)), isConnectingHeadphones=\(isConnectingHeadphones), isDisconnecting=\(isHandlingDeviceDisconnection), isRunning=\(self.isRunning)")
+        debugLog("[AudioCoordinator] handleDefaultOutputDeviceChanged: currentDefault=\(currentDefault), pending=\(String(describing: pendingTargetSystemDefaultID)), isActiveSession=\(isActiveSession), isConnecting=\(isConnectingDevice), isDisconnecting=\(isHandlingDeviceDisconnection), isRunning=\(self.isRunning)")
+        
+        let bh = AudioDeviceHelper.findBlackHoleDevice()
         
         // 1. Если мы сами программно инициировали переход на BlackHole при старте — обрабатываем в первую очередь!
         if let pending = pendingTargetSystemDefaultID {
@@ -569,7 +864,6 @@ public final class AudioCoordinator: ObservableObject {
                 safetyRoutingWorkItem?.cancel()
                 safetyRoutingWorkItem = nil
                 
-                let bh = AudioDeviceHelper.findBlackHoleDevice()
                 if let bh = bh, currentDefault == bh.id {
                     debugLog("[AudioCoordinator] BlackHole готов в macOS -> немедленный старт пайплайна")
                     if !self.isRunning {
@@ -577,93 +871,84 @@ public final class AudioCoordinator: ObservableObject {
                     }
                     return
                 }
+            } else if isActiveSession, let bh = bh, pending == bh.id {
+                // Во время старта система попыталась перебросить дефолт — удерживаем BlackHole
+                AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+                return
             } else {
-                // Если во время подключения/отключения наушников система временно перебросила дефолт — удерживаем BlackHole
-                if (isConnectingHeadphones || isHandlingDeviceDisconnection),
-                   let bh = AudioDeviceHelper.findBlackHoleDevice(),
-                   pending == bh.id {
-                    AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
-                    return
-                }
                 pendingTargetSystemDefaultID = nil
                 safetyRoutingWorkItem?.cancel()
                 safetyRoutingWorkItem = nil
             }
         }
         
-        // 2. Если сейчас идет физическое подключение или отключение наушников в HAL — не ставим на паузу
-        if isConnectingHeadphones || isHandlingDeviceDisconnection || deviceChangeDebounceWorkItem != nil {
-            debugLog("[AudioCoordinator] handleDefaultOutputDeviceChanged: аппаратное переключение в процессе, игнорируем переход на \(currentDefault)")
-            if (isRunning || wasStreamingActive),
-               let bh = AudioDeviceHelper.findBlackHoleDevice(),
-               currentDefault != bh.id {
-                AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+        // 2. Сценарий 1: В системе выбран BlackHole 2ch
+        if let bh = bh, currentDefault == bh.id {
+            if !self.isActiveSession || !self.isRunning {
+                debugLog("[AudioCoordinator] В macOS выбран BlackHole -> активация сессии и старт пайплайна")
+                self.isActiveSession = true
+                self.startPipeline(routeSystemAudio: false)
             }
             return
         }
         
-        let bh = AudioDeviceHelper.findBlackHoleDevice()
+        // 3. В системе выбрано физическое устройство (НЕ BlackHole).
+        // Определяем: это автоматическое переключение системой (при подключении/отключении наушников/BT) ИЛИ ручной выбор пользователя?
+        let allLiveDevs = AudioDeviceHelper.getAllDevices()
+        let liveOuts = allLiveDevs.filter { $0.hasOutput && !$0.isVirtual && !$0.isInternalAggregate }
         
-        // 3. Проверяем текущее системное устройство
-        if let bh = bh, currentDefault == bh.id {
-            // 🟢 Сценарий 1: В системном меню macOS выбран BlackHole 2ch (запуск приложения пользователем)
-            if !self.isRunning {
-                debugLog("[AudioCoordinator] В macOS выбран BlackHole -> немедленный старт пайплайна")
-                self.startPipeline(routeSystemAudio: false)
-            }
-        } else {
-            // Проверяем, не вызвано ли это событие подключением или отключением наушников,
-            // которое пришло на несколько миллисекунд раньше kAudioHardwarePropertyDevices:
-            let liveDevs = AudioDeviceHelper.getAllDevices().filter { $0.hasOutput && !$0.isVirtual && !$0.isInternalAggregate }
+        if isSystemAutoSwitchDueToHardwareEvent(newDefaultID: currentDefault, liveOuts: liveOuts) {
+            debugLog("[AudioCoordinator] Автопереключение системой на \(currentDefault) из-за подключения/отключения устройства! Удерживаем BlackHole.")
+            self.lastHardwareTopologyChangeTime = ProcessInfo.processInfo.systemUptime
             
-            // Проверка А: Текущее устройство вывода физически исчезло из системы (наушники отключились)
-            if self.selectedOutputDeviceID != 0 && !liveDevs.contains(where: { $0.id == self.selectedOutputDeviceID }) {
-                debugLog("[AudioCoordinator] handleDefaultOutputDeviceChanged: обнаружено физическое отключение \(self.selectedOutputDeviceID) до события списка устройств!")
+            // Если это новое устройство, которого еще не было в списке — помечаем его как подключаемое
+            if let newDev = liveOuts.first(where: { $0.id == currentDefault }),
+               self.stableOutputDeviceMap[currentDefault] == nil {
+                self.isConnectingDevice = true
+                self.pendingConnectedDeviceID = newDev.id
+                scheduleResetConnectingDevice(delay: 4.0)
+            } else if self.selectedOutputDeviceID != 0 && !liveOuts.contains(where: { $0.id == self.selectedOutputDeviceID }) {
                 self.isHandlingDeviceDisconnection = true
-                scheduleResetDisconnectingDevice(delay: 2.0)
-                handleHardwareDevicesChanged()
-                return
+                scheduleResetDisconnectingDevice(delay: 3.5)
             }
             
-            // Проверка Б: Новое дефолтное устройство — это только что подключенные наушники, которых еще не было в outputDevices
-            if let newDefaultDev = liveDevs.first(where: { $0.id == currentDefault }),
-               !self.outputDevices.contains(where: { $0.id == currentDefault }),
-               (newDefaultDev.isBluetooth || newDefaultDev.isHeadphones) {
-                debugLog("[AudioCoordinator] handleDefaultOutputDeviceChanged: обнаружено физическое подключение новых наушников \(newDefaultDev.name) до события списка устройств!")
-                self.isConnectingHeadphones = true
-                self.pendingConnectedHeadphonesID = newDefaultDev.id
-                scheduleResetConnectingHeadphones(delay: 2.5)
-                handleHardwareDevicesChanged()
-                return
+            if self.isActiveSession {
+                // Удерживаем BlackHole в системе!
+                if let bh = bh {
+                    AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+                }
             }
             
-            // ⏸ Сценарий 2: Пользователь явно выбрал в системном меню macOS другой существующий источник
-            if self.isRunning {
-                stopMonitoringBlackHoleVolume()
-                if let bh = AudioDeviceHelper.findBlackHoleDevice(),
-                   let currentBhVol = AudioDeviceHelper.getDeviceVolume(deviceID: bh.id) {
-                    self.currentSessionVolume = currentBhVol
-                }
-                // Восстанавливаем актуальную громкость на устройствах вывода
-                if self.selectedOutputDeviceID != 0 {
-                    AudioDeviceHelper.setDeviceVolume(deviceID: self.selectedOutputDeviceID, volume: self.currentSessionVolume)
-                }
-                AudioDeviceHelper.setDeviceVolume(deviceID: currentDefault, volume: self.currentSessionVolume)
-                
-                let devName = AudioDeviceHelper.getDevice(id: currentDefault)?.name ?? L10n.otherDevice
-                debugLog("[AudioCoordinator] В macOS выбран \(devName) -> пауза пайплайна")
-                self.wasStreamingActive = false
-                self.pausePipeline()
-                self.statusMessage = L10n.pausedOnDevice(devName)
+            // Запускаем обработку аппаратных изменений (она обновит список и переключит выход внутри приложения)
+            handleHardwareDevicesChanged()
+            return
+        }
+        
+        // 4. ⏸ Сценарий 2: Топология оборудования стабильна -> Пользователь ВРУЧНУЮ выбрал другое устройство в системном меню macOS
+        if self.isActiveSession || self.isRunning {
+            stopMonitoringBlackHoleVolume()
+            if let bh = bh, let currentBhVol = AudioDeviceHelper.getDeviceVolume(deviceID: bh.id) {
+                self.currentSessionVolume = currentBhVol
             }
-            if let nonVirtualDev = AudioDeviceHelper.getDevice(id: currentDefault), !nonVirtualDev.isVirtual && nonVirtualDev.hasOutput {
-                self.savedSystemDefaultOutputDeviceID = currentDefault
-                self.selectedOutputDeviceID = currentDefault
-                if let v = AudioDeviceHelper.getDeviceVolume(deviceID: currentDefault) {
-                    self.currentSessionVolume = v
-                }
-                debugLog("[AudioCoordinator] Запомнили физическое устройство вывода из macOS: \(nonVirtualDev.name) (\(currentDefault)) с vol=\(self.currentSessionVolume)")
+            if self.selectedOutputDeviceID != 0 {
+                AudioDeviceHelper.setDeviceVolume(deviceID: self.selectedOutputDeviceID, volume: self.currentSessionVolume)
             }
+            AudioDeviceHelper.setDeviceVolume(deviceID: currentDefault, volume: self.currentSessionVolume)
+            
+            let devName = AudioDeviceHelper.getDevice(id: currentDefault)?.name ?? L10n.otherDevice
+            debugLog("[AudioCoordinator] Пользователь вручную выбрал в macOS '\(devName)' -> приостановка приложения и включение выбранного устройства")
+            self.isActiveSession = false
+            self.pausePipeline()
+            self.currentStatusState = .pausedOnDevice(devName)
+        }
+        
+        if let nonVirtualDev = AudioDeviceHelper.getDevice(id: currentDefault), !nonVirtualDev.isVirtual && nonVirtualDev.hasOutput {
+            self.savedSystemDefaultOutputDeviceID = currentDefault
+            self.selectedOutputDeviceID = currentDefault
+            if let v = AudioDeviceHelper.getDeviceVolume(deviceID: currentDefault) {
+                self.currentSessionVolume = v
+            }
+            debugLog("[AudioCoordinator] Запомнили выбранное вручную устройство из macOS: \(nonVirtualDev.name) (\(currentDefault)) с vol=\(self.currentSessionVolume)")
         }
     }
     
@@ -685,8 +970,7 @@ public final class AudioCoordinator: ObservableObject {
                 debugLog("[AudioCoordinator] savedSystemDefaultOutputDeviceID = \(nonBhDef)")
             }
             // Считываем физическую громкость устройства до переключения ТОЛЬКО при обычном ручном старте
-            // (во время автоперехода на наушники не перезаписываем громкость сессии их аппаратным уровнем 1.0)
-            if !isConnectingHeadphones && !isHandlingDeviceDisconnection {
+            if !isConnectingDevice && !isHandlingDeviceDisconnection {
                 if let currentPhysVol = AudioDeviceHelper.getDeviceVolume(deviceID: nonBhDef) {
                     currentSessionVolume = currentPhysVol
                     debugLog("[AudioCoordinator] routeSystemSoundToBlackHole: pre-sync session volume: \(currentSessionVolume)")
@@ -702,7 +986,7 @@ public final class AudioCoordinator: ObservableObject {
         debugLog("[AudioCoordinator] routeSystemSoundToBlackHole: setting default to \(bh.id) with vol=\(currentSessionVolume)")
         AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
         
-        // Таймаут безопасности: запустить пайплайн через 0.6 сек, если системное событие задержалось
+        // Таймаут безопасности: запустить пайплайн через 0.4 сек, если системное событие задержалось
         safetyRoutingWorkItem?.cancel()
         let safetyItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
@@ -713,7 +997,7 @@ public final class AudioCoordinator: ObservableObject {
             }
         }
         safetyRoutingWorkItem = safetyItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: safetyItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: safetyItem)
     }
     
     private func restoreSystemSound() {
@@ -740,7 +1024,9 @@ public final class AudioCoordinator: ObservableObject {
     
     public func refreshDevices(preserveUserSelection: Bool = true) {
         let all = AudioDeviceHelper.getAllDevices()
-        self.lastKnownHardwareDeviceIDs = Set(all.map { $0.id })
+        self.lastKnownDeviceSignatures = Set(all)
+        syncPerDevicePropertyListeners(devices: all)
+        
         self.inputDevices = all.filter { $0.hasInput }
         self.outputDevices = all.filter { $0.hasOutput && !$0.isVirtual }
         
@@ -764,7 +1050,7 @@ public final class AudioCoordinator: ObservableObject {
                 self.selectedOutputDeviceID = firstOut.id
             }
         }
-        debugLog("[AudioCoordinator] refreshDevices: inID=\(selectedInputDeviceID), outID=\(selectedOutputDeviceID)")
+        debugLog("[AudioCoordinator] refreshDevices: inID=\(selectedInputDeviceID), outID=\(selectedOutputDeviceID), totalOutputs=\(outputDevices.count)")
     }
     
     // MARK: - Пайплайн обработки звука
@@ -791,6 +1077,7 @@ public final class AudioCoordinator: ObservableObject {
     
     public func startPipeline(routeSystemAudio: Bool = true) {
         debugLog("[AudioCoordinator] startPipeline(routeSystemAudio: \(routeSystemAudio))")
+        isActiveSession = true
         pipelineRetryWorkItem?.cancel()
         pipelineRetryWorkItem = nil
         
@@ -808,7 +1095,7 @@ public final class AudioCoordinator: ObservableObject {
         
         guard let inDev = inDev, let outDev = outDev else {
             debugLog("[AudioCoordinator] Error: Devices not found!")
-            statusMessage = L10n.devicesNotFound
+            currentStatusState = .devicesNotFound
             return
         }
         
@@ -822,9 +1109,15 @@ public final class AudioCoordinator: ObservableObject {
             if let bh = AudioDeviceHelper.findBlackHoleDevice(), currentDef != bh.id {
                 debugLog("[AudioCoordinator] Current default is not BlackHole, initiating routing...")
                 routeSystemSoundToBlackHole()
-                statusMessage = L10n.routingSystemAudio
+                currentStatusState = .routingSystemAudio
                 return
             }
+        }
+        
+        // Убеждаемся, что при активной сессии в системе точно стоит BlackHole
+        if let bh = AudioDeviceHelper.findBlackHoleDevice(),
+           AudioDeviceHelper.getDefaultOutputDeviceID() != bh.id {
+            AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
         }
         
         let nominalRate = outDev.sampleRate > 0 ? outDev.sampleRate : 44100.0
@@ -839,7 +1132,7 @@ public final class AudioCoordinator: ObservableObject {
         let sampleRate = spatialEngine.sampleRate > 0 ? spatialEngine.sampleRate : nominalRate
         debugLog("[AudioCoordinator] SampleRate: \(sampleRate)")
         
-        // 4. Синхронизируем частоту BlackHole с фактической частотой наушников
+        // 4. Синхронизируем частоту BlackHole с фактической частотой наушников/выхода
         AudioDeviceHelper.setSampleRate(deviceID: inDev.id, rate: sampleRate)
         
         ringBuffer.reset()
@@ -865,38 +1158,38 @@ public final class AudioCoordinator: ObservableObject {
         }
         
         // Обновляем снимок известных устройств, чтобы создание CADefaultDeviceAggregate внутри AVAudioEngine не вызвало ложный рестарт
-        self.lastKnownHardwareDeviceIDs = Set(AudioDeviceHelper.getAllDevices().map { $0.id })
+        let postStartDevs = AudioDeviceHelper.getAllDevices()
+        self.lastKnownDeviceSignatures = Set(postStartDevs)
+        self.updateStableOutputSnapshot(from: postStartDevs)
         
         // 6. Архитектура Single Attenuation (Unity Gain 1:1):
-        // BlackHole синхронизируется с текущей громкостью сессии (для системных F11/F12):
         AudioDeviceHelper.setDeviceVolume(deviceID: inDev.id, volume: currentSessionVolume)
         
         isRunning = true
-        wasStreamingActive = true
         pipelineRetryCount = 0
         syncSessionVolumeToOutputs(volume: currentSessionVolume)
         startMonitoringBlackHoleVolume(bhID: inDev.id)
-        if let actualVol = AudioDeviceHelper.getDeviceVolume(deviceID: outDev.id) {
-            debugLog("[AudioCoordinator] Single Attenuation setup: BlackHole=\(currentSessionVolume), outDev(\(outDev.name)) hardware volume=\(actualVol)")
-        } else {
-            debugLog("[AudioCoordinator] Single Attenuation setup: BlackHole=\(currentSessionVolume), outDev(\(outDev.name))=1.0")
-        }
         
         let isMuted = AudioDeviceHelper.isDeviceMuted(deviceID: inDev.id)
         let pct = Int(round(currentSessionVolume * 100))
-        if isMuted {
-            statusMessage = L10n.spatialAudioMuted(outDev.name)
-        } else {
-            statusMessage = L10n.spatialAudioActive(outDev.name, pct)
-        }
-        debugLog("[AudioCoordinator] startPipeline SUCCESS! isRunning=true")
+        currentStatusState = .active(outDev.name, pct, isMuted)
+        debugLog("[AudioCoordinator] startPipeline SUCCESS! isRunning=true, outDev=\(outDev.name)")
         
-        // Плавно снимаем флаги переходных процессов через единый управляемый таймер
-        if isConnectingHeadphones {
-            scheduleResetConnectingHeadphones(delay: 1.5)
+        // Если перед переключением устройства играло медиа (или было остановлено при отключении наушников) — возобновляем!
+        if shouldResumeMediaAfterTransition {
+            shouldResumeMediaAfterTransition = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                debugLog("[AudioCoordinator] Автоматическое возобновление воспроизведения после инициализации \(outDev.name)")
+                AudioDeviceHelper.resumeSystemMedia()
+            }
+        }
+        
+        // Плавно снимаем флаги переходных процессов через управляемый таймер
+        if isConnectingDevice {
+            scheduleResetConnectingDevice(delay: 1.5)
         }
         if isHandlingDeviceDisconnection {
-            scheduleResetDisconnectingDevice(delay: 0.5)
+            scheduleResetDisconnectingDevice(delay: 1.0)
         }
         
         if isUIVisible {
@@ -905,33 +1198,56 @@ public final class AudioCoordinator: ObservableObject {
     }
     
     private func handlePipelineFailure(outDev: AudioDevice) {
-        if pipelineRetryCount < 3 {
+        if isActiveSession {
+            if let bh = AudioDeviceHelper.findBlackHoleDevice(),
+               AudioDeviceHelper.getDefaultOutputDeviceID() != bh.id {
+                AudioDeviceHelper.setDefaultOutputDevice(deviceID: bh.id)
+            }
+        }
+        
+        if pipelineRetryCount < 8 {
             pipelineRetryCount += 1
-            debugLog("[AudioCoordinator] Ошибка старта на \(outDev.name), retry #\(pipelineRetryCount) через 0.6 сек...")
-            statusMessage = L10n.connectingTo(outDev.name)
+            debugLog("[AudioCoordinator] Ожидание готовности \(outDev.name), попытка #\(pipelineRetryCount)/8 через 0.45 сек...")
+            currentStatusState = .connectingTo(outDev.name)
             pipelineRetryWorkItem?.cancel()
             let retryItem = DispatchWorkItem { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, self.isActiveSession else { return }
                 self.pipelineRetryWorkItem = nil
                 self.startPipeline(routeSystemAudio: false)
             }
             pipelineRetryWorkItem = retryItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: retryItem)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: retryItem)
         } else {
             pipelineRetryCount = 0
-            isConnectingHeadphones = false
+            isConnectingDevice = false
             isHandlingDeviceDisconnection = false
-            debugLog("[AudioCoordinator] Ошибка старта: превышен лимит попыток. Восстанавливаем системный звук.")
-            statusMessage = L10n.outputError(outDev.name)
-            restoreSystemSound()
+            
+            // Если целевое устройство (например, зависший BT-профиль) не запустилось после 8 попыток,
+            // НЕ останавливаем приложение и НЕ оставляем тишину: откатываемся на рабочий резервный выход (например, динамики Mac)!
+            let fallbackCandidates = outputDevices.filter { $0.id != outDev.id && !$0.isVirtual }
+            if isActiveSession, let fallback = fallbackCandidates.first(where: { $0.isBuiltIn }) ?? fallbackCandidates.first {
+                debugLog("[AudioCoordinator] Устройство \(outDev.name) не ответило, автоматический откат на \(fallback.name) с сохранением работы через BlackHole")
+                self.selectedOutputDeviceID = fallback.id
+                self.savedSystemDefaultOutputDeviceID = fallback.id
+                self.startPipeline(routeSystemAudio: true)
+            } else {
+                debugLog("[AudioCoordinator] Ошибка старта: нет доступных устройств вывода. Восстанавливаем системный звук.")
+                isActiveSession = false
+                currentStatusState = .outputError(outDev.name)
+                restoreSystemSound()
+            }
         }
     }
     
     public func stopPipeline(restoreSystemAudio: Bool = true) {
-        wasStreamingActive = false
+        isActiveSession = false
+        shouldResumeMediaAfterTransition = false
+        isConnectingDevice = false
+        isHandlingDeviceDisconnection = false
         pendingTargetSystemDefaultID = nil
         safetyRoutingWorkItem?.cancel()
         safetyRoutingWorkItem = nil
+        
         // Считываем актуальную громкость BlackHole до остановки мониторинга
         if let bh = AudioDeviceHelper.findBlackHoleDevice(),
            let currentBhVol = AudioDeviceHelper.getDeviceVolume(deviceID: bh.id) {
@@ -949,17 +1265,17 @@ public final class AudioCoordinator: ObservableObject {
             restoreSystemSound()
         }
         
-        statusMessage = L10n.stopped
+        currentStatusState = .stopped
     }
     
     public func restartPipeline() {
-        if isRunning {
+        if isActiveSession || isRunning {
             startPipeline(routeSystemAudio: false)
         }
     }
     
     public func toggle() {
-        if isRunning {
+        if isActiveSession || isRunning {
             stopPipeline()
         } else {
             startPipeline()
@@ -970,9 +1286,9 @@ public final class AudioCoordinator: ObservableObject {
         guard levelTimer == nil, isRunning else { return }
         levelTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            let scale = (self.spatialEngine.inputVolumeScale > 0) ? self.spatialEngine.inputVolumeScale : 1.0
-            let rawL = self.captureUnit.peakLevelL * scale
-            let rawR = self.captureUnit.peakLevelR * scale
+            let scale = max(0.0, self.spatialEngine.inputVolumeScale)
+            let rawL = self.captureUnit.consumePeakL() * scale
+            let rawR = self.captureUnit.consumePeakR() * scale
             
             // Логарифмически-перцептивная шкала (корень из мощности, VU-стандарт)
             let targetL = min(1.0, sqrt(max(0.0, rawL)))
@@ -983,12 +1299,14 @@ public final class AudioCoordinator: ObservableObject {
                 self.leftLevel = targetL
             } else {
                 self.leftLevel = max(0.0, self.leftLevel * 0.78 + targetL * 0.22)
+                if self.leftLevel < 0.001 { self.leftLevel = 0.0 }
             }
             
             if targetR >= self.rightLevel {
                 self.rightLevel = targetR
             } else {
                 self.rightLevel = max(0.0, self.rightLevel * 0.78 + targetR * 0.22)
+                if self.rightLevel < 0.001 { self.rightLevel = 0.0 }
             }
         }
     }

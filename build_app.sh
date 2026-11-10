@@ -30,21 +30,23 @@ SWIFT_SOURCES=(
     "$SOURCES_DIR/main.swift"
 )
 
+BUILD_TMP="$(mktemp -d)"
+trap 'rm -rf "$BUILD_TMP"' EXIT
+
 echo "🔨 Сборка для Intel (x86_64)..."
 swiftc -O -target x86_64-apple-macos13.0 \
     -framework AppKit -framework SwiftUI -framework AVFoundation -framework CoreAudio -framework AudioToolbox \
     "${SWIFT_SOURCES[@]}" \
-    -o /tmp/SpatialAudio_x86_64
+    -o "$BUILD_TMP/SpatialAudio_x86_64"
 
 echo "🔨 Сборка для Apple Silicon (arm64)..."
 swiftc -O -target arm64-apple-macos13.0 \
     -framework AppKit -framework SwiftUI -framework AVFoundation -framework CoreAudio -framework AudioToolbox \
     "${SWIFT_SOURCES[@]}" \
-    -o /tmp/SpatialAudio_arm64
+    -o "$BUILD_TMP/SpatialAudio_arm64"
 
 echo "🔗 Создание Universal 2 бинарника..."
-lipo -create -output "$MACOS_DIR/SpatialAudio" /tmp/SpatialAudio_x86_64 /tmp/SpatialAudio_arm64
-rm -f /tmp/SpatialAudio_x86_64 /tmp/SpatialAudio_arm64
+lipo -create -output "$MACOS_DIR/SpatialAudio" "$BUILD_TMP/SpatialAudio_x86_64" "$BUILD_TMP/SpatialAudio_arm64"
 
 echo "📦 Создание Info.plist..."
 cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
@@ -65,9 +67,9 @@ cat << 'EOF' > "$APP_DIR/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>2.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>LSUIElement</key>
