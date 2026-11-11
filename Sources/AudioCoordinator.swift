@@ -8,6 +8,34 @@ public func debugLog(_ message: String) {
     fflush(stdout)
 }
 
+/// Изолированный наблюдатель уровней L/R и общего 25 Гц тика UI (не вызывает перерисовку остального интерфейса)
+public final class AudioLevelMonitor: ObservableObject {
+    @Published public private(set) var leftLevel: Float = 0.0
+    @Published public private(set) var rightLevel: Float = 0.0
+    public let tickPublisher = PassthroughSubject<Void, Never>()
+    
+    private static let levelEpsilon: Float = 0.0001
+    
+    fileprivate func update(left: Float, right: Float) {
+        if left != leftLevel && (left == 0.0 || abs(left - leftLevel) > Self.levelEpsilon) {
+            leftLevel = left
+        }
+        if right != rightLevel && (right == 0.0 || abs(right - rightLevel) > Self.levelEpsilon) {
+            rightLevel = right
+        }
+        tickPublisher.send()
+    }
+    
+    fileprivate func reset() {
+        if leftLevel != 0.0 {
+            leftLevel = 0.0
+        }
+        if rightLevel != 0.0 {
+            rightLevel = 0.0
+        }
+    }
+}
+
 public final class AudioCoordinator: ObservableObject {
     public static let shared = AudioCoordinator()
     
@@ -97,11 +125,13 @@ public final class AudioCoordinator: ObservableObject {
         }
     }
     
-    @Published public var leftLevel: Float = 0.0
-    @Published public var rightLevel: Float = 0.0
+    public let levels = AudioLevelMonitor()
+    public var leftLevel: Float { levels.leftLevel }
+    public var rightLevel: Float { levels.rightLevel }
     
-    public var isUIVisible: Bool = false {
+    @Published public var isUIVisible: Bool = false {
         didSet {
+            guard isUIVisible != oldValue else { return }
             if isUIVisible {
                 startLevelTimer()
             } else {
@@ -116,6 +146,8 @@ public final class AudioCoordinator: ObservableObject {
     private var currentSessionVolume: Float32 = 0.5
     private var blackHoleVolumeListenerBlock: AudioObjectPropertyListenerBlock?
     private var monitoredBlackHoleID: AudioDeviceID?
+    private var monitoredBlackHoleAddresses: [AudioObjectPropertyAddress] = []
+    private var lastSyncedOutputVolume: (deviceID: AudioDeviceID, volume: Float32)?
     
     // MARK: - Управление состоянием сессии и переходов устройств
     
@@ -214,6 +246,7 @@ public final class AudioCoordinator: ObservableObject {
             AudioDeviceHelper.setDeviceVolume(deviceID: oldID, volume: currentSessionVolume)
         }
         selectedOutputDeviceID = newID
+        lastSyncedOutputVolume = nil
         if let dev = AudioDeviceHelper.getDevice(id: newID), !dev.isVirtual && dev.hasOutput {
             savedSystemDefaultOutputDeviceID = newID
         }
@@ -263,20 +296,17 @@ public final class AudioCoordinator: ObservableObject {
     
     // MARK: - Мониторинг системной громкости через BlackHole
     
-    public func syncSessionVolumeToOutputs(volume: Float32) {
+    public func syncSessionVolumeToOutputs(volume: Float32, forceOutputSync: Bool = false) {
         self.currentSessionVolume = volume
         let devID = self.selectedOutputDeviceID
         guard devID != 0 else { return }
         let isSettable = AudioDeviceHelper.isVolumeSettable(deviceID: devID)
         if isActiveSession || isRunning || pendingTargetSystemDefaultID != nil || isConnectingDevice || isHandlingDeviceDisconnection {
             if isSettable {
-                let currentDevVol = AudioDeviceHelper.getDeviceVolume(deviceID: devID)
-                if currentDevVol == nil || abs((currentDevVol ?? 0) - volume) > 0.01 {
-                    let applied = AudioDeviceHelper.setDeviceVolume(deviceID: devID, volume: volume)
-                    debugLog("[AudioCoordinator] syncSessionVolumeToOutputs: devID=\(devID) -> set to \(volume), applied=\(applied)")
-                }
+                // Сначала мгновенно обновляем масштаб компенсации до RingBuffer, исключая 46 мс расхождение с буфером
                 if volume > 0.005 {
-                    let bhID = self.monitoredBlackHoleID ?? AudioDeviceHelper.findBlackHoleDevice()?.id
+                    let bhID = self.monitoredBlackHoleID
+                        ?? (self.selectedInputDeviceID != 0 ? self.selectedInputDeviceID : AudioDeviceHelper.findBlackHoleDevice()?.id)
                     let db: Float32 = {
                         if let bhID = bhID, let readDb = AudioDeviceHelper.getDeviceVolumeDecibels(deviceID: bhID) {
                             return readDb
@@ -284,16 +314,31 @@ public final class AudioCoordinator: ObservableObject {
                         return 64.0 * (volume - 1.0)
                     }()
                     let scale = (db <= -64.0) ? 0.0 : pow(Float(10.0), -db / 20.0)
-                    spatialEngine.inputVolumeScale = min(2000.0, scale)
+                    captureUnit.volumeScale = min(2000.0, scale)
                 } else {
-                    spatialEngine.inputVolumeScale = 0.0
+                    captureUnit.volumeScale = 0.0
+                }
+                
+                let alreadySynced = !forceOutputSync
+                    && lastSyncedOutputVolume?.deviceID == devID
+                    && abs((lastSyncedOutputVolume?.volume ?? -1.0) - volume) < 0.0005
+                if !alreadySynced {
+                    let currentDevVol = AudioDeviceHelper.getDeviceVolume(deviceID: devID)
+                    let currentDevMuted = AudioDeviceHelper.isDeviceMuted(deviceID: devID)
+                    let targetMuted = (volume <= 0.001)
+                    if forceOutputSync || currentDevVol == nil || abs((currentDevVol ?? 0) - volume) > 0.005 || currentDevMuted != targetMuted {
+                        let applied = AudioDeviceHelper.setDeviceVolume(deviceID: devID, volume: volume)
+                        debugLog("[AudioCoordinator] syncSessionVolumeToOutputs: devID=\(devID) -> set to \(volume), applied=\(applied)")
+                    }
+                    lastSyncedOutputVolume = (devID, volume)
                 }
             } else {
-                spatialEngine.inputVolumeScale = 1.0
+                captureUnit.volumeScale = 1.0
             }
         } else {
+            captureUnit.volumeScale = 1.0
             let applied = AudioDeviceHelper.setDeviceVolume(deviceID: devID, volume: volume)
-            spatialEngine.inputVolumeScale = 1.0
+            lastSyncedOutputVolume = (devID, volume)
             debugLog("[AudioCoordinator] syncSessionVolumeToOutputs: inactive -> set devID=\(devID) to \(volume), applied=\(applied)")
         }
     }
@@ -342,47 +387,44 @@ public final class AudioCoordinator: ObservableObject {
             let isMuted = AudioDeviceHelper.isDeviceMuted(deviceID: bhID)
             if let vol = AudioDeviceHelper.getDeviceVolume(deviceID: bhID) {
                 let effectiveVol: Float32 = isMuted ? 0.0 : vol
-                DispatchQueue.main.async {
-                    self.syncSessionVolumeToOutputs(volume: effectiveVol)
-                    let pct = Int(round(vol * 100))
-                    self.currentStatusState = .active(self.currentOutputDeviceName(), pct, isMuted)
-                    debugLog("[AudioCoordinator] Системная громкость BlackHole -> \(vol) (\(pct)%), muted=\(isMuted)")
-                }
+                self.syncSessionVolumeToOutputs(volume: effectiveVol)
+                let pct = Int(round(vol * 100))
+                self.currentStatusState = .active(self.currentOutputDeviceName(), pct, isMuted)
+                debugLog("[AudioCoordinator] Системная громкость BlackHole -> \(vol) (\(pct)%), muted=\(isMuted)")
             }
         }
         self.blackHoleVolumeListenerBlock = block
         
-        // 1. VirtualMainVolume (основной селектор macOS для изменения громкости клавишами F11/F12)
+        var addresses: [AudioObjectPropertyAddress] = []
+        
+        // Подписываемся на ОДИН основной селектор громкости, чтобы не плодить дублирующие колбэки на одно нажатие
         var addrVMVC = AudioObjectPropertyAddress(
             mSelector: AudioDeviceHelper.kVirtualMainVolume,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        if AudioObjectHasProperty(bhID, &addrVMVC) {
-            AudioObjectAddPropertyListenerBlock(bhID, &addrVMVC, DispatchQueue.main, block)
-        }
-        
-        // 2. VolumeScalar на Main
         var addrMain = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: kAudioObjectPropertyElementMain
         )
-        if AudioObjectHasProperty(bhID, &addrMain) {
-            AudioObjectAddPropertyListenerBlock(bhID, &addrMain, DispatchQueue.main, block)
-        }
-        
-        // 3. VolumeScalar на Ch1
         var addrCh1 = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyVolumeScalar,
             mScope: kAudioDevicePropertyScopeOutput,
             mElement: 1
         )
-        if AudioObjectHasProperty(bhID, &addrCh1) {
+        if AudioObjectHasProperty(bhID, &addrVMVC) {
+            AudioObjectAddPropertyListenerBlock(bhID, &addrVMVC, DispatchQueue.main, block)
+            addresses.append(addrVMVC)
+        } else if AudioObjectHasProperty(bhID, &addrMain) {
+            AudioObjectAddPropertyListenerBlock(bhID, &addrMain, DispatchQueue.main, block)
+            addresses.append(addrMain)
+        } else if AudioObjectHasProperty(bhID, &addrCh1) {
             AudioObjectAddPropertyListenerBlock(bhID, &addrCh1, DispatchQueue.main, block)
+            addresses.append(addrCh1)
         }
         
-        // 4. Mute на выходе BlackHole (клавиша F10)
+        // Mute на выходе BlackHole (клавиша F10)
         var addrMute = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyMute,
             mScope: kAudioDevicePropertyScopeOutput,
@@ -390,40 +432,20 @@ public final class AudioCoordinator: ObservableObject {
         )
         if AudioObjectHasProperty(bhID, &addrMute) {
             AudioObjectAddPropertyListenerBlock(bhID, &addrMute, DispatchQueue.main, block)
+            addresses.append(addrMute)
         }
+        
+        self.monitoredBlackHoleAddresses = addresses
     }
     
     private func stopMonitoringBlackHoleVolume() {
         guard let bhID = monitoredBlackHoleID, let block = blackHoleVolumeListenerBlock else { return }
         
-        var addrVMVC = AudioObjectPropertyAddress(
-            mSelector: AudioDeviceHelper.kVirtualMainVolume,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(bhID, &addrVMVC, DispatchQueue.main, block)
-        
-        var addrMain = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(bhID, &addrMain, DispatchQueue.main, block)
-        
-        var addrCh1 = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: 1
-        )
-        AudioObjectRemovePropertyListenerBlock(bhID, &addrCh1, DispatchQueue.main, block)
-        
-        var addrMute = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyMute,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(bhID, &addrMute, DispatchQueue.main, block)
-        
+        for addr in monitoredBlackHoleAddresses {
+            var mutableAddr = addr
+            AudioObjectRemovePropertyListenerBlock(bhID, &mutableAddr, DispatchQueue.main, block)
+        }
+        self.monitoredBlackHoleAddresses.removeAll()
         self.blackHoleVolumeListenerBlock = nil
         self.monitoredBlackHoleID = nil
     }
@@ -735,6 +757,7 @@ public final class AudioCoordinator: ObservableObject {
             
             self.selectedOutputDeviceID = newlyConnected.id
             self.savedSystemDefaultOutputDeviceID = newlyConnected.id
+            self.lastSyncedOutputVolume = nil
             
             if self.isActiveSession {
                 debugLog("[AudioCoordinator] Сессия активна -> переключаем вывод на \(newlyConnected.name) и удерживаем BlackHole")
@@ -781,6 +804,7 @@ public final class AudioCoordinator: ObservableObject {
                     self.selectedOutputDeviceID = fallback.id
                     self.savedSystemDefaultOutputDeviceID = fallback.id
                     self.previousOutputDeviceID = nil
+                    self.lastSyncedOutputVolume = nil
                     
                     if self.isActiveSession {
                         self.stopAudioUnitsOnly()
@@ -1059,8 +1083,7 @@ public final class AudioCoordinator: ObservableObject {
         stopLevelTimer()
         captureUnit.stop()
         spatialEngine.stop()
-        leftLevel = 0.0
-        rightLevel = 0.0
+        levels.reset()
     }
     
     public func pausePipeline() {
@@ -1070,6 +1093,7 @@ public final class AudioCoordinator: ObservableObject {
         cancelVolumeReinforcement()
         stopAudioUnitsOnly()
         isRunning = false
+        lastSyncedOutputVolume = nil
         if selectedOutputDeviceID != 0 {
             AudioDeviceHelper.setDeviceVolume(deviceID: selectedOutputDeviceID, volume: currentSessionVolume)
         }
@@ -1137,6 +1161,13 @@ public final class AudioCoordinator: ObservableObject {
         
         ringBuffer.reset()
         
+        // Предсинхронизация громкости и компенсации ДО старта захвата (чтобы первые сэмплы уже имели точный масштаб)
+        stopMonitoringBlackHoleVolume()
+        AudioDeviceHelper.setDeviceVolume(deviceID: inDev.id, volume: currentSessionVolume)
+        lastSyncedOutputVolume = nil
+        syncSessionVolumeToOutputs(volume: currentSessionVolume, forceOutputSync: true)
+        captureUnit.snapScale()
+        
         // 5. Настройка захвата
         guard captureUnit.setup(deviceID: inDev.id, sampleRate: sampleRate) else {
             debugLog("[AudioCoordinator] Error: captureUnit.setup failed!")
@@ -1162,12 +1193,8 @@ public final class AudioCoordinator: ObservableObject {
         self.lastKnownDeviceSignatures = Set(postStartDevs)
         self.updateStableOutputSnapshot(from: postStartDevs)
         
-        // 6. Архитектура Single Attenuation (Unity Gain 1:1):
-        AudioDeviceHelper.setDeviceVolume(deviceID: inDev.id, volume: currentSessionVolume)
-        
         isRunning = true
         pipelineRetryCount = 0
-        syncSessionVolumeToOutputs(volume: currentSessionVolume)
         startMonitoringBlackHoleVolume(bhID: inDev.id)
         
         let isMuted = AudioDeviceHelper.isDeviceMuted(deviceID: inDev.id)
@@ -1283,38 +1310,35 @@ public final class AudioCoordinator: ObservableObject {
     }
     
     private func startLevelTimer() {
-        guard levelTimer == nil, isRunning else { return }
-        levelTimer = Timer.scheduledTimer(withTimeInterval: 0.04, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            let scale = max(0.0, self.spatialEngine.inputVolumeScale)
-            let rawL = self.captureUnit.consumePeakL() * scale
-            let rawR = self.captureUnit.consumePeakR() * scale
+        guard levelTimer == nil, isRunning, isUIVisible else { return }
+        let timer = Timer(timeInterval: 0.04, repeats: true) { [weak self] _ in
+            guard let self = self, self.isRunning, self.isUIVisible else { return }
+            let rawL = self.captureUnit.consumePeakL()
+            let rawR = self.captureUnit.consumePeakR()
             
             // Логарифмически-перцептивная шкала (корень из мощности, VU-стандарт)
             let targetL = min(1.0, sqrt(max(0.0, rawL)))
             let targetR = min(1.0, sqrt(max(0.0, rawR)))
             
             // Мгновенная атака на пиках, мягкий баллистический спад
-            if targetL >= self.leftLevel {
-                self.leftLevel = targetL
-            } else {
-                self.leftLevel = max(0.0, self.leftLevel * 0.78 + targetL * 0.22)
-                if self.leftLevel < 0.001 { self.leftLevel = 0.0 }
-            }
+            let currentL = self.levels.leftLevel
+            var nextL = (targetL >= currentL) ? targetL : max(0.0, currentL * 0.78 + targetL * 0.22)
+            if nextL < 0.001 { nextL = 0.0 }
             
-            if targetR >= self.rightLevel {
-                self.rightLevel = targetR
-            } else {
-                self.rightLevel = max(0.0, self.rightLevel * 0.78 + targetR * 0.22)
-                if self.rightLevel < 0.001 { self.rightLevel = 0.0 }
-            }
+            let currentR = self.levels.rightLevel
+            var nextR = (targetR >= currentR) ? targetR : max(0.0, currentR * 0.78 + targetR * 0.22)
+            if nextR < 0.001 { nextR = 0.0 }
+            
+            self.levels.update(left: nextL, right: nextR)
         }
+        // .common включает NSEventTrackingRunLoopMode — индикаторы и фоновые волны не замирают при удержании ползунков
+        RunLoop.main.add(timer, forMode: .common)
+        levelTimer = timer
     }
     
     private func stopLevelTimer() {
         levelTimer?.invalidate()
         levelTimer = nil
-        leftLevel = 0.0
-        rightLevel = 0.0
+        levels.reset()
     }
 }

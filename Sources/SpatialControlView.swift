@@ -293,8 +293,7 @@ private struct CornerWavePacket {
 }
 
 struct BackgroundCornerWavesView: View {
-    let leftLevel: Float
-    let rightLevel: Float
+    @ObservedObject var levels: AudioLevelMonitor
     let isActive: Bool
     let isDark: Bool
     
@@ -323,8 +322,8 @@ struct BackgroundCornerWavesView: View {
         GeometryReader { geo in
             let w = geo.size.width
             let h = geo.size.height
-            let lvlL = CGFloat(leftLevel)
-            let lvlR = CGFloat(rightLevel)
+            let lvlL = CGFloat(levels.leftLevel)
+            let lvlR = CGFloat(levels.rightLevel)
             
             Canvas { ctx, size in
                 guard isActive else { return }
@@ -410,14 +409,14 @@ struct BackgroundCornerWavesView: View {
                     )
                 }
             }
-            // Обновление физики волн строго когда окно активно (когда поповер закрыт, таймер не тикает -> 0% CPU)
-            .onReceive(Timer.publish(every: 0.04, on: .main, in: .common).autoconnect()) { _ in
+            // Обновление физики волн строго от единого таймера AudioCoordinator (при закрытой панели или остановке таймер остановлен -> 0% CPU)
+            .onReceive(levels.tickPublisher) { _ in
                 guard isActive else {
                     if !wavesL.isEmpty { wavesL.removeAll() }
                     if !wavesR.isEmpty { wavesR.removeAll() }
                     return
                 }
-                if leftLevel > 0.005 || rightLevel > 0.005 || !wavesL.isEmpty || !wavesR.isEmpty {
+                if levels.leftLevel > 0.005 || levels.rightLevel > 0.005 || !wavesL.isEmpty || !wavesR.isEmpty {
                     stepWavePhysics(height: h)
                 }
             }
@@ -425,6 +424,7 @@ struct BackgroundCornerWavesView: View {
                 if !active {
                     wavesL.removeAll()
                     wavesR.removeAll()
+                    tickCounter = 0
                 }
             }
         }
@@ -432,15 +432,15 @@ struct BackgroundCornerWavesView: View {
     }
     
     private func stepWavePhysics(height: CGFloat) {
-        guard isActive else {
+        guard isActive, height > 1 else {
             if !wavesL.isEmpty { wavesL.removeAll() }
             if !wavesR.isEmpty { wavesR.removeAll() }
             return
         }
         
         tickCounter += 1
-        let l = CGFloat(leftLevel)
-        let r = CGFloat(rightLevel)
+        let l = CGFloat(levels.leftLevel)
+        let r = CGFloat(levels.rightLevel)
         
         // Каждые 3 тика (~120 мс) рождаем новый гребень волны в углу, если есть сигнал (максимум 5 активных волн на угол для легкости)
         if tickCounter % 3 == 0 {
@@ -549,8 +549,7 @@ public struct SpatialControlView: View {
                 .fill(windowBgColor)
             
             BackgroundCornerWavesView(
-                leftLevel: coordinator.leftLevel,
-                rightLevel: coordinator.rightLevel,
+                levels: coordinator.levels,
                 isActive: coordinator.isRunning && coordinator.isUIVisible,
                 isDark: isDark
             )
@@ -766,9 +765,9 @@ public struct SpatialControlView: View {
     // MARK: - 1. Шапка: Бренд + Язык + Статус | Переключатель темы + Кнопка Активно
     
     private var headerCard: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             ZStack {
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(
                         LinearGradient(
                             colors: coordinator.isRunning
@@ -778,19 +777,21 @@ public struct SpatialControlView: View {
                             endPoint: .bottomTrailing
                         )
                     )
-                    .frame(width: 36, height: 36)
+                    .frame(width: 34, height: 34)
                     .shadow(color: coordinator.isRunning ? Color.blue.opacity(0.30) : .clear, radius: 6, x: 0, y: 3)
                 
                 Image(systemName: coordinator.isRunning ? "person.wave.2.fill" : "person.wave.2")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.white)
             }
             
             VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Text("Spatial Audio")
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.system(size: 13.5, weight: .bold))
                         .foregroundColor(primaryTextColor)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                     
                     Button(action: {
                         withAnimation(.spring(response: 0.18, dampingFraction: 0.8)) {
@@ -800,6 +801,7 @@ public struct SpatialControlView: View {
                         Text(l10n.language.badgeTitle)
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(primaryTextColor.opacity(0.85))
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 2)
                             .background(primaryTextColor.opacity(0.10))
@@ -812,7 +814,7 @@ public struct SpatialControlView: View {
                 HStack(spacing: 5) {
                     Circle()
                         .fill(coordinator.isRunning ? Color(red: 0.16, green: 0.85, blue: 0.55) : Color.gray)
-                        .frame(width: 6.5, height: 6.5)
+                        .frame(width: 6, height: 6)
                     
                     Text(coordinator.statusMessage)
                         .font(.system(size: 11, weight: .medium))
@@ -821,63 +823,66 @@ public struct SpatialControlView: View {
                         .truncationMode(.tail)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             
-            Spacer(minLength: 4)
-            
-            // Кнопка переключения темы Светлая / Тёмная (слева от кнопки Активно)
-            Button(action: {
-                withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
-                    themeManager.toggleTheme()
-                }
-            }) {
-                ZStack {
-                    Circle()
-                        .fill(primaryTextColor.opacity(0.08))
-                        .frame(width: 30, height: 30)
-                        .overlay(
-                            Circle()
-                                .stroke(cardBorderColor, lineWidth: 1)
-                        )
-                    
-                    MinimalThemeIcon(isDark: isDark)
-                }
-            }
-            .buttonStyle(TactileButtonStyle())
-            .help(L10n.themeToggleHelp)
-            
-            // Кнопка Активно / Запустить
-            Button(action: {
-                withAnimation(.spring(response: 0.20, dampingFraction: 0.78)) {
-                    if coordinator.isRunning {
-                        coordinator.stopPipeline(restoreSystemAudio: true)
-                    } else {
-                        coordinator.startPipeline()
+            HStack(spacing: 6) {
+                // Кнопка переключения темы Светлая / Тёмная (слева от кнопки Активно)
+                Button(action: {
+                    withAnimation(.spring(response: 0.22, dampingFraction: 0.8)) {
+                        themeManager.toggleTheme()
+                    }
+                }) {
+                    ZStack {
+                        Circle()
+                            .fill(primaryTextColor.opacity(0.08))
+                            .frame(width: 28, height: 28)
+                            .overlay(
+                                Circle()
+                                    .stroke(cardBorderColor, lineWidth: 1)
+                            )
+                        
+                        MinimalThemeIcon(isDark: isDark)
                     }
                 }
-            }) {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(Color.white)
-                        .frame(width: 6, height: 6)
-                    Text(coordinator.isRunning ? L10n.activeBtnTitle : L10n.startBtn)
-                        .font(.system(size: 11.5, weight: .bold))
-                        .foregroundColor(.white)
+                .buttonStyle(TactileButtonStyle())
+                .help(L10n.themeToggleHelp)
+                
+                // Кнопка Активно / Запустить
+                Button(action: {
+                    withAnimation(.spring(response: 0.20, dampingFraction: 0.78)) {
+                        if coordinator.isRunning {
+                            coordinator.stopPipeline(restoreSystemAudio: true)
+                        } else {
+                            coordinator.startPipeline()
+                        }
+                    }
+                }) {
+                    HStack(spacing: 4.5) {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 5.5, height: 5.5)
+                        Text(coordinator.isRunning ? L10n.activeBtnTitle : L10n.startBtn)
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .background(
+                        Capsule()
+                            .fill(
+                                coordinator.isRunning
+                                    ? LinearGradient(colors: [Color(red: 0.18, green: 0.52, blue: 0.98), Color(red: 0.12, green: 0.72, blue: 0.94)], startPoint: .leading, endPoint: .trailing)
+                                    : LinearGradient(colors: [Color.gray.opacity(0.65), Color.gray.opacity(0.50)], startPoint: .leading, endPoint: .trailing)
+                            )
+                    )
+                    .shadow(color: coordinator.isRunning ? Color.blue.opacity(0.28) : .clear, radius: 5, x: 0, y: 2)
                 }
-                .padding(.horizontal, 11)
-                .frame(height: 30)
-                .background(
-                    Capsule()
-                        .fill(
-                            coordinator.isRunning
-                                ? LinearGradient(colors: [Color(red: 0.18, green: 0.52, blue: 0.98), Color(red: 0.12, green: 0.72, blue: 0.94)], startPoint: .leading, endPoint: .trailing)
-                                : LinearGradient(colors: [Color.gray.opacity(0.65), Color.gray.opacity(0.50)], startPoint: .leading, endPoint: .trailing)
-                        )
-                )
-                .shadow(color: coordinator.isRunning ? Color.blue.opacity(0.28) : .clear, radius: 5, x: 0, y: 2)
+                .buttonStyle(TactileButtonStyle())
             }
-            .buttonStyle(TactileButtonStyle())
         }
-        .padding(.horizontal, 11)
+        .padding(.horizontal, 10)
         .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -1221,8 +1226,7 @@ public struct SpatialControlView: View {
             SoundstageVisualizer(
                 angle: coordinator.isSpeakerMode ? coordinator.physicalSpeakerAngleDeg : coordinator.speakerAngleDeg,
                 isEnabled: coordinator.isSpatialEnabled && coordinator.isRunning,
-                leftLevel: coordinator.leftLevel,
-                rightLevel: coordinator.rightLevel,
+                levels: coordinator.levels,
                 listenerLabel: L10n.listenerYou,
                 isDark: isDark
             )
@@ -1408,10 +1412,10 @@ public struct SpatialControlView: View {
                     Text("L")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(secondaryTextColor)
-                    AudioLevelMeter(level: coordinator.leftLevel, isDark: isDark)
+                    AudioLevelMeter(levels: coordinator.levels, isLeft: true, isDark: isDark)
                 }
                 HStack(spacing: 6) {
-                    AudioLevelMeter(level: coordinator.rightLevel, isDark: isDark)
+                    AudioLevelMeter(levels: coordinator.levels, isLeft: false, isDark: isDark)
                     Text("R")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(secondaryTextColor)
@@ -1487,8 +1491,7 @@ public struct SpatialControlView: View {
 struct SoundstageVisualizer: View {
     let angle: Double
     let isEnabled: Bool
-    let leftLevel: Float
-    let rightLevel: Float
+    let levels: AudioLevelMonitor
     let listenerLabel: String
     let isDark: Bool
     
@@ -1585,10 +1588,10 @@ struct SoundstageVisualizer: View {
                 }
                 .position(x: centerX, y: bottomY)
                 
-                SpeakerNode(label: "L", isActive: isEnabled, level: leftLevel)
+                SpeakerNode(label: "L", isActive: isEnabled, levels: levels, isLeft: true)
                     .position(x: lx, y: ly)
                 
-                SpeakerNode(label: "R", isActive: isEnabled, level: rightLevel)
+                SpeakerNode(label: "R", isActive: isEnabled, levels: levels, isLeft: false)
                     .position(x: rx, y: ry)
             }
         }
@@ -1598,7 +1601,12 @@ struct SoundstageVisualizer: View {
 struct SpeakerNode: View {
     let label: String
     let isActive: Bool
-    let level: Float
+    @ObservedObject var levels: AudioLevelMonitor
+    let isLeft: Bool
+    
+    private var level: Float {
+        isLeft ? levels.leftLevel : levels.rightLevel
+    }
     
     var body: some View {
         ZStack {
@@ -1625,8 +1633,13 @@ struct SpeakerNode: View {
 // MARK: - Звуковые полосы L / R (в фирменной изумрудно-бирюзово-синей палитре без задержки)
 
 struct AudioLevelMeter: View {
-    let level: Float
+    @ObservedObject var levels: AudioLevelMonitor
+    let isLeft: Bool
     let isDark: Bool
+    
+    private var level: Float {
+        isLeft ? levels.leftLevel : levels.rightLevel
+    }
     
     var body: some View {
         GeometryReader { geo in

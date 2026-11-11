@@ -159,27 +159,20 @@ private final class StereoFeed {
 
     private let stashL = UnsafeMutablePointer<Float>.allocate(capacity: StereoFeed.maxFrames)
     private let stashR = UnsafeMutablePointer<Float>.allocate(capacity: StereoFeed.maxFrames)
-    private let rampBuf = UnsafeMutablePointer<Float>.allocate(capacity: StereoFeed.maxFrames)
     private var stashFrames: Int = 0
     private var consumedL: Bool = true
     private var consumedR: Bool = true
     private var consumedDirect: Bool = true
-    
-    /// Масштаб громкости для компенсации ослабления BlackHole в Float32 до физического ЦАП
-    var volumeScale: Float = 1.0
-    private var currentScale: Float = 1.0
 
     init(ring: AudioRingBuffer) {
         self.ring = ring
         stashL.initialize(repeating: 0, count: StereoFeed.maxFrames)
         stashR.initialize(repeating: 0, count: StereoFeed.maxFrames)
-        rampBuf.initialize(repeating: 0, count: StereoFeed.maxFrames)
     }
 
     deinit {
         stashL.deallocate()
         stashR.deallocate()
-        rampBuf.deallocate()
     }
 
     private static func targetMidParam(forAngle angleDeg: Double) -> BiquadParam {
@@ -197,26 +190,6 @@ private final class StereoFeed {
             }
         }
         return BiquadParam(freq: 1620.0, q: 1.10, gainDB: 3.50)
-    }
-    
-    private func applyScale(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frames: Int) {
-        guard frames > 0 else { return }
-        let target = volumeScale
-        if frames >= 2 && abs(currentScale - target) > 0.0001 {
-            var start = currentScale
-            var end = target
-            vDSP_vgen(&start, &end, rampBuf, 1, vDSP_Length(frames))
-            vDSP_vmul(left, 1, rampBuf, 1, left, 1, vDSP_Length(frames))
-            vDSP_vmul(right, 1, rampBuf, 1, right, 1, vDSP_Length(frames))
-            currentScale = target
-        } else if abs(target - 1.0) > 0.0001 {
-            var scale = target
-            vDSP_vsmul(left, 1, &scale, left, 1, vDSP_Length(frames))
-            vDSP_vsmul(right, 1, &scale, right, 1, vDSP_Length(frames))
-            currentScale = target
-        } else {
-            currentScale = 1.0
-        }
     }
 
     func resetState() {
@@ -446,7 +419,6 @@ private final class StereoFeed {
             cycleReverbBlend = curRev
 
             ring.read(left: stashL, right: stashR, count: frames)
-            applyScale(left: stashL, right: stashR, frames: frames)
             if !cycleBypass {
                 if cycleSpeakerMode {
                     applySpeakerModeShuffler(left: stashL, right: stashR, frames: frames)
@@ -566,12 +538,6 @@ public final class SpatialEngine {
         didSet {
             guard abs(volume - oldValue) > 0.0001 else { return }
             updateVolume()
-        }
-    }
-    
-    public var inputVolumeScale: Float = 1.0 {
-        didSet {
-            feed.volumeScale = inputVolumeScale
         }
     }
 

@@ -313,14 +313,16 @@ public final class AudioDeviceHelper {
     public static func getDeviceVolumeDecibels(deviceID: AudioDeviceID) -> Float32? {
         var db: Float32 = 0
         var size = UInt32(MemoryLayout<Float32>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeDecibels,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        if AudioObjectHasProperty(deviceID, &addr) {
-            let status = AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &db)
-            if status == noErr { return db }
+        for element in [kAudioObjectPropertyElementMain, AudioObjectPropertyElement(1)] {
+            var addr = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyVolumeDecibels,
+                mScope: kAudioDevicePropertyScopeOutput,
+                mElement: element
+            )
+            if AudioObjectHasProperty(deviceID, &addr) {
+                let status = AudioObjectGetPropertyData(deviceID, &addr, 0, nil, &size, &db)
+                if status == noErr { return db }
+            }
         }
         return nil
     }
@@ -359,7 +361,7 @@ public final class AudioDeviceHelper {
         return false
     }
     
-    /// Установить системную громкость устройства (VirtualMainVolume через AudioHardwareService, Main и каналы 1..2)
+    /// Установить системную громкость устройства (VirtualMainVolume через AudioHardwareService, с фоллбэком на Main или каналы 1..2)
     @discardableResult
     public static func setDeviceVolume(deviceID: AudioDeviceID, volume: Float32) -> Bool {
         var v = max(0.0, min(1.0, volume))
@@ -384,50 +386,61 @@ public final class AudioDeviceHelper {
             }
         }
         if !vmvcApplied && AudioObjectHasProperty(deviceID, &addrVMVC) {
-            let s = AudioObjectSetPropertyData(deviceID, &addrVMVC, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-            if s == noErr {
-                didApply = true
-                vmvcApplied = true
-            }
-        }
-        
-        // 2. VolumeScalar Main
-        var addrMain = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyVolumeScalar,
-            mScope: kAudioDevicePropertyScopeOutput,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        if AudioObjectHasProperty(deviceID, &addrMain) {
             var isSettable: DarwinBoolean = false
-            if AudioObjectIsPropertySettable(deviceID, &addrMain, &isSettable) == noErr && isSettable.boolValue {
-                let s = AudioObjectSetPropertyData(deviceID, &addrMain, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-                if s == noErr { didApply = true }
+            if AudioObjectIsPropertySettable(deviceID, &addrVMVC, &isSettable) == noErr && isSettable.boolValue {
+                let s = AudioObjectSetPropertyData(deviceID, &addrVMVC, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                if s == noErr {
+                    didApply = true
+                    vmvcApplied = true
+                }
             }
         }
         
-        // 3. VolumeScalar каналы 1 и 2 (без двойного дублирования IPC)
-        for ch in 1...2 {
-            var addrCh = AudioObjectPropertyAddress(
+        // 2. VolumeScalar Main — только если VirtualMainVolume недоступен (без дублирования IPC/AVRCP)
+        var mainApplied = false
+        if !vmvcApplied {
+            var addrMain = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyVolumeScalar,
                 mScope: kAudioDevicePropertyScopeOutput,
-                mElement: UInt32(ch)
+                mElement: kAudioObjectPropertyElementMain
             )
-            var chApplied = false
-            if AudioObjectHasProperty(deviceID, &addrCh) {
+            if AudioObjectHasProperty(deviceID, &addrMain) {
                 var isSettable: DarwinBoolean = false
-                if AudioObjectIsPropertySettable(deviceID, &addrCh, &isSettable) == noErr && isSettable.boolValue {
-                    let s = AudioObjectSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                if AudioObjectIsPropertySettable(deviceID, &addrMain, &isSettable) == noErr && isSettable.boolValue {
+                    let s = AudioObjectSetPropertyData(deviceID, &addrMain, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
                     if s == noErr {
                         didApply = true
-                        chApplied = true
+                        mainApplied = true
                     }
                 }
             }
-            if !chApplied && AudioHardwareServiceHasProperty(deviceID, &addrCh) {
-                var isSettable: DarwinBoolean = false
-                if AudioHardwareServiceIsPropertySettable(deviceID, &addrCh, &isSettable) == noErr && isSettable.boolValue {
-                    let s = AudioHardwareServiceSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
-                    if s == noErr { didApply = true }
+        }
+        
+        // 3. VolumeScalar каналы 1 и 2 — только если не сработали VirtualMainVolume и Main
+        if !vmvcApplied && !mainApplied {
+            for ch in 1...2 {
+                var addrCh = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyVolumeScalar,
+                    mScope: kAudioDevicePropertyScopeOutput,
+                    mElement: UInt32(ch)
+                )
+                var chApplied = false
+                if AudioObjectHasProperty(deviceID, &addrCh) {
+                    var isSettable: DarwinBoolean = false
+                    if AudioObjectIsPropertySettable(deviceID, &addrCh, &isSettable) == noErr && isSettable.boolValue {
+                        let s = AudioObjectSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                        if s == noErr {
+                            didApply = true
+                            chApplied = true
+                        }
+                    }
+                }
+                if !chApplied && AudioHardwareServiceHasProperty(deviceID, &addrCh) {
+                    var isSettable: DarwinBoolean = false
+                    if AudioHardwareServiceIsPropertySettable(deviceID, &addrCh, &isSettable) == noErr && isSettable.boolValue {
+                        let s = AudioHardwareServiceSetPropertyData(deviceID, &addrCh, 0, nil, UInt32(MemoryLayout<Float32>.size), &v)
+                        if s == noErr { didApply = true }
+                    }
                 }
             }
         }

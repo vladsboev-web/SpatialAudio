@@ -114,11 +114,11 @@ public enum L10n {
     }
     
     public static func spatialAudioMuted(_ name: String) -> String {
-        isRU ? "Spatial Audio: \(name) (Заглушено)" : "Spatial Audio: \(name) (Muted)"
+        isRU ? "\(name) (Заглушено)" : "\(name) (Muted)"
     }
     
     public static func spatialAudioActive(_ name: String, _ pct: Int) -> String {
-        "Spatial Audio: \(name) (\(pct)%)"
+        "\(name) (\(pct)%)"
     }
     
     public static func pausedOnDevice(_ name: String) -> String {

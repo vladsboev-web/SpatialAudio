@@ -3,6 +3,7 @@ import CoreAudio
 import AudioToolbox
 import AVFoundation
 import Accelerate
+import os.lock
 
 public final class AudioCaptureUnit {
     private var audioUnit: AudioComponentInstance?
@@ -13,6 +14,33 @@ public final class AudioCaptureUnit {
     public private(set) var peakLevelL: Float = 0.0
     public private(set) var peakLevelR: Float = 0.0
     private var currentDeviceID: AudioDeviceID?
+    
+    private var scaleLock = os_unfair_lock()
+    private var _volumeScale: Float = 1.0
+    private var shouldSnapScale: Bool = false
+    private var currentScale: Float = 1.0
+    
+    /// Масштаб компенсации ослабления BlackHole (применяется до записи в кольцевой буфер)
+    public var volumeScale: Float {
+        get {
+            os_unfair_lock_lock(&scaleLock)
+            let val = _volumeScale
+            os_unfair_lock_unlock(&scaleLock)
+            return val
+        }
+        set {
+            os_unfair_lock_lock(&scaleLock)
+            _volumeScale = max(0.0, newValue)
+            os_unfair_lock_unlock(&scaleLock)
+        }
+    }
+    
+    /// Фиксирует текущий масштаб без сглаживающего перехода на старте потока
+    public func snapScale() {
+        os_unfair_lock_lock(&scaleLock)
+        shouldSnapScale = true
+        os_unfair_lock_unlock(&scaleLock)
+    }
     
     /// Считывает текущий пик левого канала и плавно гасит накопленное значение (чтобы при остановке потока пик не зависал)
     public func consumePeakL() -> Float {
@@ -34,6 +62,7 @@ public final class AudioCaptureUnit {
     private static let maxFrames = 4096
     private var leftScratch = [Float](repeating: 0, count: maxFrames)
     private var rightScratch = [Float](repeating: 0, count: maxFrames)
+    private let rampScratch = UnsafeMutablePointer<Float>.allocate(capacity: maxFrames)
     private let ablPointer: UnsafeMutableAudioBufferListPointer = AudioBufferList.allocate(maximumBuffers: 2)
     
     // Вспомогательный контекст
@@ -44,18 +73,54 @@ public final class AudioCaptureUnit {
     
     public init(ringBuffer: AudioRingBuffer) {
         self.ringBuffer = ringBuffer
+        self.rampScratch.initialize(repeating: 0, count: AudioCaptureUnit.maxFrames)
         self.context.captureUnit = self
     }
     
     deinit {
         stop()
         destroyAudioUnit()
+        rampScratch.deallocate()
         free(UnsafeMutableRawPointer(ablPointer.unsafeMutablePointer))
+    }
+    
+    private func applyScale(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, frames: Int) {
+        guard frames > 0 else { return }
+        os_unfair_lock_lock(&scaleLock)
+        let target = _volumeScale
+        let snap = shouldSnapScale
+        if snap { shouldSnapScale = false }
+        os_unfair_lock_unlock(&scaleLock)
+        
+        if snap {
+            currentScale = target
+        }
+        
+        if frames >= 2 && abs(currentScale - target) > 0.0001 {
+            var start = currentScale
+            var end = target
+            vDSP_vgen(&start, &end, rampScratch, 1, vDSP_Length(frames))
+            vDSP_vmul(left, 1, rampScratch, 1, left, 1, vDSP_Length(frames))
+            vDSP_vmul(right, 1, rampScratch, 1, right, 1, vDSP_Length(frames))
+            currentScale = target
+        } else if target <= 0.00001 {
+            vDSP_vclr(left, 1, vDSP_Length(frames))
+            vDSP_vclr(right, 1, vDSP_Length(frames))
+            currentScale = 0.0
+        } else if abs(target - 1.0) > 0.0001 {
+            var scale = target
+            vDSP_vsmul(left, 1, &scale, left, 1, vDSP_Length(frames))
+            vDSP_vsmul(right, 1, &scale, right, 1, vDSP_Length(frames))
+            currentScale = target
+        } else {
+            currentScale = 1.0
+        }
     }
     
     public func setup(deviceID: AudioDeviceID, sampleRate: Double = 44100.0) -> Bool {
         stop()
         destroyAudioUnit()
+        snapScale()
         
         self.sampleRate = sampleRate
         self.currentDeviceID = deviceID
@@ -169,12 +234,15 @@ public final class AudioCaptureUnit {
                         )
                         
                         if st == noErr {
-                            unit.ringBuffer.write(left: lPtr.baseAddress!, right: rPtr.baseAddress!, count: frames)
+                            let lBase = lPtr.baseAddress!
+                            let rBase = rPtr.baseAddress!
+                            unit.applyScale(left: lBase, right: rBase, frames: frames)
+                            unit.ringBuffer.write(left: lBase, right: rBase, count: frames)
                             
                             var maxL: Float = 0.0
                             var maxR: Float = 0.0
-                            vDSP_maxmgv(lPtr.baseAddress!, 1, &maxL, vDSP_Length(frames))
-                            vDSP_maxmgv(rPtr.baseAddress!, 1, &maxR, vDSP_Length(frames))
+                            vDSP_maxmgv(lBase, 1, &maxL, vDSP_Length(frames))
+                            vDSP_maxmgv(rBase, 1, &maxR, vDSP_Length(frames))
                             unit.peakLevelL = max(unit.peakLevelL * 0.95, maxL)
                             unit.peakLevelR = max(unit.peakLevelR * 0.95, maxR)
                         }

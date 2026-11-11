@@ -9,7 +9,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2013.0%2B-blue?logo=apple)](https://github.com/vladsboev-web/SpatialAudio/releases)
 [![Architecture](https://img.shields.io/badge/arch-Universal%202%20(Apple%20Silicon%20%26%20Intel)-success?logo=apple)](https://github.com/vladsboev-web/SpatialAudio/releases)
-[![Version](https://img.shields.io/badge/version-2.0-orange)](https://github.com/vladsboev-web/SpatialAudio/releases)
+[![Version](https://img.shields.io/badge/version-2.0.1-orange)](https://github.com/vladsboev-web/SpatialAudio/releases)
 [![DSP Engine](https://img.shields.io/badge/DSP-Apple%20HRTFHQ%20%2B%20M%2FS%20XTC-purple)](#-acoustic-engineering--dsp-architecture)
 [![Download](https://img.shields.io/badge/download-Latest%20Release%20(.zip)-brightgreen)](https://github.com/vladsboev-web/SpatialAudio/releases/latest)
 
