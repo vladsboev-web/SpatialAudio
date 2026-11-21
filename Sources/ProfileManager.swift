@@ -11,6 +11,7 @@ public struct SpatialProfile: Identifiable, Codable, Equatable {
     public var gainMultiplier: Double?
     public var isSpeakerMode: Bool? = false
     public var physicalSpeakerAngleDeg: Double? = 22.5
+    public var effectMix: Double? = 1.0
     
     public init(
         id: UUID = UUID(),
@@ -22,7 +23,8 @@ public struct SpatialProfile: Identifiable, Codable, Equatable {
         volume: Double = 1.0,
         gainMultiplier: Double? = 1.0,
         isSpeakerMode: Bool? = false,
-        physicalSpeakerAngleDeg: Double? = 22.5
+        physicalSpeakerAngleDeg: Double? = 22.5,
+        effectMix: Double? = 1.0
     ) {
         self.id = id
         self.name = name
@@ -34,7 +36,14 @@ public struct SpatialProfile: Identifiable, Codable, Equatable {
         self.gainMultiplier = gainMultiplier
         self.isSpeakerMode = isSpeakerMode ?? false
         self.physicalSpeakerAngleDeg = physicalSpeakerAngleDeg ?? 22.5
+        self.effectMix = effectMix ?? 1.0
     }
+}
+
+public struct DeviceProfileLink: Codable, Equatable {
+    public var isSpeaker: Bool
+    public var profileID: UUID
+    public var deviceName: String
 }
 
 public final class ProfileManager: ObservableObject {
@@ -46,6 +55,7 @@ public final class ProfileManager: ObservableObject {
     private let speakerProfilesKey = "SpatialAudio_Speaker_Profiles_List"
     private let activeSpeakerProfileIDKey = "SpatialAudio_Active_Speaker_Profile_ID"
     private let lastActiveModeKey = "SpatialAudio_Last_Active_SpeakerMode"
+    private let deviceProfileMapKey = "SpatialAudio_Device_Profile_Map"
     
     // Legacy-ключи для мягкой миграции старых профилей
     private let legacyProfilesKey = "SpatialAudio_Profiles_List"
@@ -56,6 +66,8 @@ public final class ProfileManager: ObservableObject {
     
     @Published public var speakerProfiles: [SpatialProfile] = []
     @Published public var activeSpeakerProfileID: UUID = UUID()
+    
+    @Published public var deviceProfileMap: [String: DeviceProfileLink] = [:]
     
     /// Текущий выбранный режим (false = Наушники, true = Колонки), синхронизированный со списком профилей
     @Published public var currentModeIsSpeaker: Bool = false
@@ -91,7 +103,8 @@ public final class ProfileManager: ObservableObject {
             volume: 1.0,
             gainMultiplier: 1.0,
             isSpeakerMode: false,
-            physicalSpeakerAngleDeg: 22.5
+            physicalSpeakerAngleDeg: 22.5,
+            effectMix: 1.0
         )
     }
     
@@ -165,6 +178,7 @@ public final class ProfileManager: ObservableObject {
             for i in 0..<loadedHP.count {
                 loadedHP[i].isSpeakerMode = false
                 loadedHP[i].reverbBlend = min(0.03, max(0.0, loadedHP[i].reverbBlend))
+                loadedHP[i].effectMix = min(1.0, max(0.0, loadedHP[i].effectMix ?? 1.0))
                 loadedHP[i].name = Self.normalizeDefaultName(loadedHP[i].name, isRU: isRU)
             }
         }
@@ -203,6 +217,11 @@ public final class ProfileManager: ObservableObject {
             self.activeSpeakerProfileID = firstSP.id
         }
         
+        if let mapData = defaults.data(forKey: deviceProfileMapKey),
+           let decodedMap = try? JSONDecoder().decode([String: DeviceProfileLink].self, from: mapData) {
+            self.deviceProfileMap = decodedMap
+        }
+        
         saveProfiles()
     }
     
@@ -229,6 +248,24 @@ public final class ProfileManager: ObservableObject {
         return activeProfile
     }
     
+    public func rememberProfile(forKey key: String, deviceName: String, isSpeaker: Bool, profileID: UUID) {
+        let link = DeviceProfileLink(isSpeaker: isSpeaker, profileID: profileID, deviceName: deviceName)
+        guard deviceProfileMap[key] != link else { return }
+        deviceProfileMap[key] = link
+        if let encoded = try? JSONEncoder().encode(deviceProfileMap) {
+            UserDefaults.standard.set(encoded, forKey: deviceProfileMapKey)
+        }
+    }
+    
+    public func rememberedProfile(forKey key: String) -> (isSpeaker: Bool, profile: SpatialProfile)? {
+        guard let link = deviceProfileMap[key] else { return nil }
+        let list = link.isSpeaker ? speakerProfiles : headphoneProfiles
+        guard let profile = list.first(where: { $0.id == link.profileID }) ?? list.first else {
+            return nil
+        }
+        return (link.isSpeaker, profile)
+    }
+    
     // MARK: - CRUD операции (индивидуально для активного режима Наушники или Колонки)
     
     @discardableResult
@@ -239,7 +276,8 @@ public final class ProfileManager: ObservableObject {
         reverbBlend: Double = 0.01,
         volume: Double = 1.0,
         isSpeakerMode: Bool = false,
-        physicalSpeakerAngleDeg: Double = 22.5
+        physicalSpeakerAngleDeg: Double = 22.5,
+        effectMix: Double = 1.0
     ) -> SpatialProfile {
         let currentList = isSpeakerMode ? speakerProfiles : headphoneProfiles
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -254,7 +292,8 @@ public final class ProfileManager: ObservableObject {
             volume: volume,
             gainMultiplier: 1.0,
             isSpeakerMode: isSpeakerMode,
-            physicalSpeakerAngleDeg: physicalSpeakerAngleDeg
+            physicalSpeakerAngleDeg: physicalSpeakerAngleDeg,
+            effectMix: min(1.0, max(0.0, effectMix))
         )
         
         if isSpeakerMode {
@@ -286,7 +325,8 @@ public final class ProfileManager: ObservableObject {
         reverbBlend: Double,
         volume: Double,
         isSpeakerMode: Bool = false,
-        physicalSpeakerAngleDeg: Double = 22.5
+        physicalSpeakerAngleDeg: Double = 22.5,
+        effectMix: Double = 1.0
     ) {
         if isSpeakerMode {
             guard let index = speakerProfiles.firstIndex(where: { $0.id == activeSpeakerProfileID }) else { return }
@@ -302,6 +342,7 @@ public final class ProfileManager: ObservableObject {
             headphoneProfiles[index].reverbBlend = min(0.03, max(0.0, reverbBlend))
             headphoneProfiles[index].volume = volume
             headphoneProfiles[index].isSpeakerMode = false
+            headphoneProfiles[index].effectMix = min(1.0, max(0.0, effectMix))
         }
         saveProfiles()
     }

@@ -99,11 +99,25 @@ public final class AudioCoordinator: ObservableObject {
             saveActiveProfileSettings()
         }
     }
-    
+
+    @Published public var effectMix: Double = 1.0 {
+        didSet {
+            guard abs(effectMix - oldValue) > 0.0001 else { return }
+            spatialEngine.effectMix = Float(effectMix)
+            saveActiveProfileSettings()
+        }
+    }
+
     @Published public var inputDevices: [AudioDevice] = []
     @Published public var outputDevices: [AudioDevice] = []
     @Published public var selectedInputDeviceID: AudioDeviceID = 0
-    @Published public var selectedOutputDeviceID: AudioDeviceID = 0
+    @Published public var selectedOutputDeviceID: AudioDeviceID = 0 {
+        didSet {
+            if selectedOutputDeviceID != oldValue {
+                syncProfileForCurrentOutput()
+            }
+        }
+    }
     
     @Published public var isRunning: Bool = false
     @Published public var isBlackHoleInstalled: Bool = false
@@ -178,6 +192,11 @@ public final class AudioCoordinator: ObservableObject {
     private var shouldResumeMediaAfterTransition: Bool = false
     /// Активные слушатели потоков/источников на физических устройствах
     private var devicePropertyListenerBlocks: [AudioDeviceID: AudioObjectPropertyListenerBlock] = [:]
+    private var engineRecoveryWorkItem: DispatchWorkItem?
+    private var outputRateListenerBlock: AudioObjectPropertyListenerBlock?
+    private var monitoredOutputRateDeviceID: AudioDeviceID?
+    private var engineWatchdogTimer: Timer?
+    private var lastProfileDeviceKey: String?
     
     private init() {
         if let currentProfile = ProfileManager.shared.activeProfile {
@@ -211,6 +230,9 @@ public final class AudioCoordinator: ObservableObject {
         
         setupHardwareListeners()
         syncPerDevicePropertyListeners(devices: initialDevs)
+        spatialEngine.onConfigurationChange = { [weak self] in
+            self?.scheduleEngineRecovery(reason: "engine config change")
+        }
         
         // Если в системе уже выбран BlackHole — сразу автоматически запускаем
         if let currentDef = AudioDeviceHelper.getDefaultOutputDeviceID(),
@@ -219,6 +241,8 @@ public final class AudioCoordinator: ObservableObject {
             self.isActiveSession = true
             startPipeline(routeSystemAudio: false)
         }
+        
+        syncProfileForCurrentOutput()
     }
     
     private func updateStableOutputSnapshot(from allDevs: [AudioDevice]) {
@@ -268,14 +292,61 @@ public final class AudioCoordinator: ObservableObject {
                 reverbBlend: self.reverbBlend,
                 volume: self.volume,
                 isSpeakerMode: self.isSpeakerMode,
-                physicalSpeakerAngleDeg: self.physicalSpeakerAngleDeg
+                physicalSpeakerAngleDeg: self.physicalSpeakerAngleDeg,
+                effectMix: self.effectMix
             )
         }
         profileSaveDebounceWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: workItem)
     }
     
-    public func applyProfile(_ profile: SpatialProfile) {
+    public var currentProfileDeviceName: String? {
+        guard selectedOutputDeviceID != 0,
+              let dev = AudioDeviceHelper.getDevice(id: selectedOutputDeviceID),
+              !dev.isVirtual,
+              dev.hasOutput else { return nil }
+        guard ProfileManager.shared.deviceProfileMap[dev.profileKey]?.profileID == ProfileManager.shared.activeProfileID else {
+            return nil
+        }
+        return dev.name
+    }
+    
+    private func rememberCurrentDeviceProfile() {
+        guard selectedOutputDeviceID != 0,
+              let dev = AudioDeviceHelper.getDevice(id: selectedOutputDeviceID),
+              !dev.isVirtual,
+              dev.hasOutput else { return }
+        ProfileManager.shared.rememberProfile(
+            forKey: dev.profileKey,
+            deviceName: dev.name,
+            isSpeaker: ProfileManager.shared.currentModeIsSpeaker,
+            profileID: ProfileManager.shared.activeProfileID
+        )
+        lastProfileDeviceKey = dev.profileKey
+    }
+    
+    private func syncProfileForCurrentOutput() {
+        guard selectedOutputDeviceID != 0,
+              let dev = AudioDeviceHelper.getDevice(id: selectedOutputDeviceID),
+              !dev.isVirtual,
+              dev.hasOutput else { return }
+        guard dev.profileKey != lastProfileDeviceKey else { return }
+        lastProfileDeviceKey = dev.profileKey
+        
+        if let remembered = ProfileManager.shared.rememberedProfile(forKey: dev.profileKey) {
+            debugLog("[AudioCoordinator] Загружен профиль '\(remembered.profile.name)' (speaker=\(remembered.isSpeaker)) для устройства '\(dev.name)'")
+            applyProfile(remembered.profile, keepVolume: true)
+        } else {
+            let isSpeaker = !dev.isHeadphones
+            debugLog("[AudioCoordinator] Новое устройство '\(dev.name)' -> автоопределение режима: \(isSpeaker ? "Колонки" : "Наушники")")
+            if let profile = ProfileManager.shared.switchMode(isSpeakerMode: isSpeaker) {
+                applyProfile(profile, keepVolume: true)
+            }
+            rememberCurrentDeviceProfile()
+        }
+    }
+    
+    public func applyProfile(_ profile: SpatialProfile, keepVolume: Bool = false) {
         profileSaveDebounceWorkItem?.cancel()
         isApplyingProfile = true
         let mode = profile.isSpeakerMode ?? ProfileManager.shared.currentModeIsSpeaker
@@ -286,12 +357,16 @@ public final class AudioCoordinator: ObservableObject {
             self.physicalSpeakerAngleDeg = profile.physicalSpeakerAngleDeg ?? 22.5
         } else {
             self.speakerAngleDeg = profile.speakerAngleDeg
+            self.effectMix = min(1.0, max(0.0, profile.effectMix ?? 1.0))
         }
         self.reverbBlend = min(0.03, max(0.0, profile.reverbBlend))
-        self.volume = profile.volume
+        if !keepVolume {
+            self.volume = profile.volume
+        }
         isApplyingProfile = false
         
         ProfileManager.shared.selectProfile(id: profile.id)
+        rememberCurrentDeviceProfile()
     }
     
     // MARK: - Мониторинг системной громкости через BlackHole
@@ -448,6 +523,76 @@ public final class AudioCoordinator: ObservableObject {
         self.monitoredBlackHoleAddresses.removeAll()
         self.blackHoleVolumeListenerBlock = nil
         self.monitoredBlackHoleID = nil
+    }
+    
+    private func scheduleEngineRecovery(reason: String) {
+        guard isActiveSession else { return }
+        engineRecoveryWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.engineRecoveryWorkItem = nil
+            guard self.isActiveSession else { return }
+            debugLog("[AudioCoordinator] Восстановление пайплайна (\(reason))")
+            self.pipelineRetryCount = 0
+            self.startPipeline(routeSystemAudio: false)
+        }
+        engineRecoveryWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: item)
+    }
+    
+    private func startMonitoringOutputSampleRate(deviceID: AudioDeviceID) {
+        stopMonitoringOutputSampleRate()
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &addr) else { return }
+        
+        monitoredOutputRateDeviceID = deviceID
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self = self, self.isRunning, self.isActiveSession else { return }
+            if let rate = AudioDeviceHelper.getDevice(id: deviceID)?.sampleRate,
+               abs(rate - self.spatialEngine.sampleRate) > 1.0 {
+                debugLog("[AudioCoordinator] Частота выхода \(deviceID) изменилась: \(self.spatialEngine.sampleRate) -> \(rate)")
+                self.scheduleEngineRecovery(reason: "output sample rate changed")
+            }
+        }
+        outputRateListenerBlock = block
+        AudioObjectAddPropertyListenerBlock(deviceID, &addr, DispatchQueue.main, block)
+    }
+    
+    private func stopMonitoringOutputSampleRate() {
+        guard let deviceID = monitoredOutputRateDeviceID, let block = outputRateListenerBlock else { return }
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(deviceID, &addr, DispatchQueue.main, block)
+        outputRateListenerBlock = nil
+        monitoredOutputRateDeviceID = nil
+    }
+    
+    private func startEngineWatchdog() {
+        stopEngineWatchdog()
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if self.isRunning &&
+               self.isActiveSession &&
+               self.engineRecoveryWorkItem == nil &&
+               self.pipelineRetryWorkItem == nil &&
+               !self.spatialEngine.isEngineActuallyRunning {
+                self.scheduleEngineRecovery(reason: "watchdog: engine not running")
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        engineWatchdogTimer = timer
+    }
+    
+    private func stopEngineWatchdog() {
+        engineWatchdogTimer?.invalidate()
+        engineWatchdogTimer = nil
     }
     
     // MARK: - CoreAudio Hardware Listeners (Горячее подключение наушников/BT и системное переключение)
@@ -1080,6 +1225,8 @@ public final class AudioCoordinator: ObservableObject {
     // MARK: - Пайплайн обработки звука
     
     private func stopAudioUnitsOnly() {
+        stopMonitoringOutputSampleRate()
+        stopEngineWatchdog()
         stopLevelTimer()
         captureUnit.stop()
         spatialEngine.stop()
@@ -1088,6 +1235,8 @@ public final class AudioCoordinator: ObservableObject {
     
     public func pausePipeline() {
         debugLog("[AudioCoordinator] pausePipeline called")
+        engineRecoveryWorkItem?.cancel()
+        engineRecoveryWorkItem = nil
         pipelineRetryWorkItem?.cancel()
         pipelineRetryWorkItem = nil
         cancelVolumeReinforcement()
@@ -1196,6 +1345,9 @@ public final class AudioCoordinator: ObservableObject {
         isRunning = true
         pipelineRetryCount = 0
         startMonitoringBlackHoleVolume(bhID: inDev.id)
+        startMonitoringOutputSampleRate(deviceID: outDev.id)
+        syncProfileForCurrentOutput()
+        startEngineWatchdog()
         
         let isMuted = AudioDeviceHelper.isDeviceMuted(deviceID: inDev.id)
         let pct = Int(round(currentSessionVolume * 100))
@@ -1272,6 +1424,8 @@ public final class AudioCoordinator: ObservableObject {
         isConnectingDevice = false
         isHandlingDeviceDisconnection = false
         pendingTargetSystemDefaultID = nil
+        engineRecoveryWorkItem?.cancel()
+        engineRecoveryWorkItem = nil
         safetyRoutingWorkItem?.cancel()
         safetyRoutingWorkItem = nil
         

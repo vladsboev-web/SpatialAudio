@@ -4,12 +4,15 @@ import AudioToolbox
 
 public struct AudioDevice: Identifiable, Hashable {
     public let id: AudioDeviceID
+    public let uid: String
     public let name: String
     public let hasInput: Bool
     public let hasOutput: Bool
     public let sampleRate: Double
     public let transportType: UInt32
     public let dataSourceID: UInt32
+    
+    public var profileKey: String { "\(uid)#\(dataSourceID)" }
     
     public var isBluetooth: Bool {
         return transportType == kAudioDeviceTransportTypeBluetooth ||
@@ -177,8 +180,24 @@ public final class AudioDeviceHelper {
             AudioObjectGetPropertyData(id, &dsAddress, 0, nil, &dsSize, &dataSource)
         }
         
+        // UID (постоянный строковый идентификатор устройства для привязки профиля)
+        var deviceUID = "\(id)"
+        var unmanagedUID: Unmanaged<CFString>?
+        var uidSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var uidAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        if AudioObjectHasProperty(id, &uidAddress),
+           AudioObjectGetPropertyData(id, &uidAddress, 0, nil, &uidSize, &unmanagedUID) == noErr,
+           let cfUID = unmanagedUID?.takeRetainedValue() {
+            deviceUID = cfUID as String
+        }
+        
         return AudioDevice(
             id: id,
+            uid: deviceUID,
             name: deviceName,
             hasInput: hasIn,
             hasOutput: hasOut,

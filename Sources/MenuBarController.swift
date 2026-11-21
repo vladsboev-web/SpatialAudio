@@ -43,6 +43,16 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
                 self?.updateStatusButton(isRunning: running)
             }
             .store(in: &cancellables)
+
+        AudioCoordinator.shared.$isSpeakerMode
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { [weak self] in
+                    self?.updateOpenPanelSizeAnimated()
+                }
+            }
+            .store(in: &cancellables)
         
         if let button = statusItem?.button {
             button.target = self
@@ -176,6 +186,14 @@ public final class MenuBarController: NSObject, NSMenuDelegate {
         return NSRect(x: x, y: y, width: panelWidth, height: panelHeight)
     }
     
+    private func updateOpenPanelSizeAnimated() {
+        guard isPanelOpen, !isAnimatingClose, let panel = panel, let button = statusItem?.button else { return }
+        let targetFrame = calculateTargetFrame(for: panel, relativeTo: button)
+        if panel.frame != targetFrame {
+            panel.setFrame(targetFrame, display: true, animate: true)
+        }
+    }
+
     private func openPanelAnimated() {
         guard let panel = panel, let button = statusItem?.button else { return }
         

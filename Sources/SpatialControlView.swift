@@ -1058,6 +1058,20 @@ public struct SpatialControlView: View {
                         activeDropdown = (activeDropdown == .profile) ? nil : .profile
                     }
                 }
+                
+                if let devName = coordinator.currentProfileDeviceName {
+                    let currentDev = coordinator.outputDevices.first(where: { $0.id == coordinator.selectedOutputDeviceID })
+                    HStack(spacing: 4) {
+                        Image(systemName: currentDev.map { outputDeviceSymbol(for: $0) } ?? "headphones")
+                            .font(.system(size: 9))
+                        Text(L10n.profileForDevice(devName))
+                            .font(.system(size: 10))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 2)
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -1154,7 +1168,8 @@ public struct SpatialControlView: View {
             reverbBlend: coordinator.reverbBlend,
             volume: coordinator.volume,
             isSpeakerMode: coordinator.isSpeakerMode,
-            physicalSpeakerAngleDeg: coordinator.physicalSpeakerAngleDeg
+            physicalSpeakerAngleDeg: coordinator.physicalSpeakerAngleDeg,
+            effectMix: coordinator.effectMix
         )
         coordinator.applyProfile(p)
         isCreatingProfile = false
@@ -1326,13 +1341,40 @@ public struct SpatialControlView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .background(
-                RoundedRectangle(cornerRadius: 15, style: .continuous)
-                    .fill(cardBgColor)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 15, style: .continuous)
-                            .stroke(cardBorderColor, lineWidth: 1)
-                    )
-            )
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .fill(cardBgColor)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                .stroke(cardBorderColor, lineWidth: 1)
+                        )
+                )
+
+            if !coordinator.isSpeakerMode {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(L10n.effectStrengthLabel)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundColor(secondaryTextColor)
+                        Spacer()
+                        Text(String(format: "%.0f%%", coordinator.effectMix * 100))
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundColor(isDark ? Color(red: 0.35, green: 0.85, blue: 0.98) : Color(red: 0.05, green: 0.45, blue: 0.88))
+                    }
+                    Slider(value: $coordinator.effectMix, in: 0.0...1.0, step: 0.01)
+                        .tint(Color(red: 0.16, green: 0.75, blue: 0.96))
+                        .disabled(!coordinator.isSpatialEnabled || !coordinator.isRunning)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .fill(cardBgColor)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                .stroke(cardBorderColor, lineWidth: 1)
+                        )
+                )
+            }
             
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -1340,13 +1382,29 @@ public struct SpatialControlView: View {
                         .font(.system(size: 11.5, weight: .medium))
                         .foregroundColor(secondaryTextColor)
                     Spacer()
-                    Text(String(format: "%.1f%%", coordinator.reverbBlend * 100))
-                        .font(.system(size: 11.5, weight: .bold))
-                        .foregroundColor(isDark ? Color(red: 0.38, green: 0.68, blue: 0.98) : Color(red: 0.15, green: 0.40, blue: 0.92))
+                    if coordinator.isSpeakerMode {
+                        Text(String(format: "%.1f%%", coordinator.reverbBlend * 100))
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundColor(isDark ? Color(red: 0.38, green: 0.68, blue: 0.98) : Color(red: 0.15, green: 0.40, blue: 0.92))
+                    } else {
+                        Text("\(Int(round((coordinator.reverbBlend / 0.03) * 100.0)))%")
+                            .font(.system(size: 11.5, weight: .bold))
+                            .foregroundColor(isDark ? Color(red: 0.38, green: 0.68, blue: 0.98) : Color(red: 0.15, green: 0.40, blue: 0.92))
+                    }
                 }
-                Slider(value: $coordinator.reverbBlend, in: 0.0...0.03, step: 0.001)
-                    .tint(Color(red: 0.22, green: 0.55, blue: 0.98))
-                    .disabled(!coordinator.isSpatialEnabled || !coordinator.isRunning)
+                if coordinator.isSpeakerMode {
+                    Slider(value: $coordinator.reverbBlend, in: 0.0...0.03, step: 0.001)
+                        .tint(Color(red: 0.22, green: 0.55, blue: 0.98))
+                        .disabled(!coordinator.isSpatialEnabled || !coordinator.isRunning)
+                } else {
+                    let roomPctBinding = Binding<Double>(
+                        get: { min(100.0, max(0.0, (coordinator.reverbBlend / 0.03) * 100.0)) },
+                        set: { coordinator.reverbBlend = min(0.03, max(0.0, ($0 / 100.0) * 0.03)) }
+                    )
+                    Slider(value: roomPctBinding, in: 0.0...100.0, step: 1.0)
+                        .tint(Color(red: 0.22, green: 0.55, blue: 0.98))
+                        .disabled(!coordinator.isSpatialEnabled || !coordinator.isRunning)
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)

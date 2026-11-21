@@ -273,6 +273,10 @@ public enum L10n {
     public static var physicalSpeakerAngleLabel: String {
         isRU ? "Реальный угол колонок:" : "Physical Speaker Angle:"
     }
+
+    public static var effectStrengthLabel: String {
+        isRU ? "Сила эффекта:" : "Effect Strength:"
+    }
     
     public static var activeBtnTitle: String {
         isRU ? "Активно" : "Active"
@@ -292,6 +296,10 @@ public enum L10n {
     
     public static var profileHeaderLabel: String {
         isRU ? "Профиль" : "Profile"
+    }
+    
+    public static func profileForDevice(_ name: String) -> String {
+        isRU ? "для \(name)" : "for \(name)"
     }
     
     public static var quitShortTitle: String {
